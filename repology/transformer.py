@@ -1,4 +1,4 @@
-# Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
+# Copyright (C) 2016-2017 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
 #
@@ -15,11 +15,14 @@
 # You should have received a copy of the GNU General Public License
 # along with repology.  If not, see <http://www.gnu.org/licenses/>.
 
+import os
 import pprint
 import re
 import sys
 
 import yaml
+
+from repology.version import VersionCompare
 
 
 class RuleApplyResult:
@@ -29,35 +32,45 @@ class RuleApplyResult:
 
 
 class PackageTransformer:
-    def __init__(self, rulespath=None, rulestext=None):
+    def __init__(self, rulesdir=None, rulestext=None):
         self.dollar0 = re.compile('\$0', re.ASCII)
         self.dollarN = re.compile('\$([0-9]+)', re.ASCII)
+
+        self.rules = []
 
         if rulestext:
             self.rules = yaml.safe_load(rulestext)
         else:
-            with open(rulespath) as rulesfile:
-                self.rules = yaml.safe_load(rulesfile)
+            for filename in sorted(os.listdir(rulesdir)):
+                rulespath = os.path.join(rulesdir, filename)
+                if not os.path.isfile(rulespath) or not rulespath.endswith('.yaml'):
+                    continue
+
+                with open(rulespath) as rulesfile:
+                    self.rules += yaml.safe_load(rulesfile)
 
         pp = pprint.PrettyPrinter(width=10000)
-        rulenum = 0
-        for rule in self.rules:
+        for rulenum, rule in enumerate(self.rules):
             # save pretty-print before all transformations
             rule['pretty'] = pp.pformat(rule)
 
             # convert some fields to lists
-            for field in ['name', 'ver', 'category', 'family']:
+            for field in ['name', 'ver', 'category', 'family', 'wwwpart']:
                 if field in rule and not isinstance(rule[field], list):
                     rule[field] = [rule[field]]
 
-            # compile regexps
-            for field in ['namepat', 'verpat']:
+            # convert some fields to lowercase
+            for field in ['category', 'wwwpart']:
                 if field in rule:
-                    rule[field] = re.compile(rule[field] + '$', re.ASCII)
+                    rule[field] = [s.lower() for s in rule[field]]
+
+            # compile regexps
+            for field in ['namepat', 'verpat', 'wwwpat']:
+                if field in rule:
+                    rule[field] = re.compile(rule[field], re.ASCII)
 
             rule['matches'] = 0
             rule['number'] = rulenum
-            rulenum += 1
 
         self.fastrules = {}
         self.slowrules = []
@@ -70,6 +83,10 @@ class PackageTransformer:
                 self.slowrules.append(rule)
 
     def ApplyRule(self, rule, package):
+        # pattern matches are reused when rule applies
+        name_match = None
+        ver_match = None
+
         # match family
         if 'family' in rule:
             if package.family not in rule['family']:
@@ -77,7 +94,9 @@ class PackageTransformer:
 
         # match categories
         if 'category' in rule:
-            if package.category not in rule['category']:
+            if not package.category:
+                return RuleApplyResult.unmatched
+            if package.category.lower() not in rule['category']:
                 return RuleApplyResult.unmatched
 
         # match name
@@ -87,7 +106,8 @@ class PackageTransformer:
 
         # match name patterns
         if 'namepat' in rule:
-            if not rule['namepat'].match(package.effname):
+            name_match = rule['namepat'].fullmatch(package.effname)
+            if not name_match:
                 return RuleApplyResult.unmatched
 
         # match version
@@ -97,12 +117,46 @@ class PackageTransformer:
 
         # match version patterns
         if 'verpat' in rule:
-            if not rule['verpat'].match(package.version):
+            ver_match = rule['verpat'].fullmatch(package.version.lower())
+            if not ver_match:
                 return RuleApplyResult.unmatched
 
         # match number of version components
         if 'verlonger' in rule:
-            if not len(package.version.split('.')) > rule['verlonger']:
+            if not len(re.split('[^a-zA-Z0-9]', package.version)) > rule['verlonger']:
+                return RuleApplyResult.unmatched
+
+        # compare versions
+        if 'vergt' in rule:
+            if VersionCompare(package.version, rule['vergt']) <= 0:
+                return RuleApplyResult.unmatched
+
+        if 'verge' in rule:
+            if VersionCompare(package.version, rule['verge']) < 0:
+                return RuleApplyResult.unmatched
+
+        if 'verlt' in rule:
+            if VersionCompare(package.version, rule['verlt']) >= 0:
+                return RuleApplyResult.unmatched
+
+        if 'verle' in rule:
+            if VersionCompare(package.version, rule['verle']) > 0:
+                return RuleApplyResult.unmatched
+
+        # match name patterns
+        if 'wwwpat' in rule:
+            if not package.homepage or not rule['wwwpat'].fullmatch(package.homepage):
+                return RuleApplyResult.unmatched
+
+        if 'wwwpart' in rule:
+            if not package.homepage:
+                return RuleApplyResult.unmatched
+            matched = False
+            for wwwpart in rule['wwwpart']:
+                if wwwpart in package.homepage.lower():
+                    matched = True
+                    break
+            if not matched:
                 return RuleApplyResult.unmatched
 
         # rule matches, apply effects!
@@ -122,17 +176,53 @@ class PackageTransformer:
         if 'unignorever' in rule:
             package.ignoreversion = False
 
+        if 'devel' in rule:
+            package.devel = True
+
+        if 'undevel' in rule:
+            package.devel = False
+
         if 'last' in rule:
             result = RuleApplyResult.last
 
+        if 'addflavor' in rule:
+            flavors = []
+            if isinstance(rule['addflavor'], bool):
+                flavors = [package.effname]
+            elif isinstance(rule['addflavor'], str):
+                flavors = [rule['addflavor']]
+            elif isinstance(rule['addflavor'], list):
+                flavors = rule['addflavor']
+            else:
+                raise RuntimeError('addflavor must be boolean or str or list')
+
+            if name_match:
+                flavors = [self.dollarN.sub(lambda x: name_match.group(int(x.group(1))), flavor) for flavor in flavors]
+            else:
+                flavors = [self.dollar0.sub(package.effname, flavor) for flavor in flavors]
+
+            flavors = [flavor.strip('-') for flavor in flavors]
+
+            package.flavors += [flavor for flavor in flavors if flavor]
+
         if 'setname' in rule:
-            match = None
-            if 'namepat' in rule:
-                match = rule['namepat'].match(package.effname)
-            if match:
-                package.effname = self.dollarN.sub(lambda x: match.group(int(x.group(1))), rule['setname'])
+            if name_match:
+                package.effname = self.dollarN.sub(lambda x: name_match.group(int(x.group(1))), rule['setname'])
             else:
                 package.effname = self.dollar0.sub(package.effname, rule['setname'])
+
+        if 'setver' in rule:
+            version_before_fix = package.version
+
+            if package.origversion is None:
+                package.origversion = package.version
+
+            if ver_match:
+                package.version = self.dollarN.sub(lambda x: ver_match.group(int(x.group(1))), rule['setver'])
+            else:
+                package.version = self.dollar0.sub(package.version, rule['setver'])
+
+            package.verfixed = package.version != version_before_fix
 
         if 'replaceinname' in rule:
             for pattern, replacement in rule['replaceinname'].items():
@@ -154,8 +244,9 @@ class PackageTransformer:
         return None
 
     def Process(self, package):
-        # start with package.name as is
-        package.effname = package.name
+        # start with package.name as is, if it was not already set
+        if package.effname is None:
+            package.effname = package.name
 
         # keep the next fast rule that will match
         # it will be racalculated as soon as it's reached or

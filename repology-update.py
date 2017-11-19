@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
+# Copyright (C) 2016-2017 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
 #
@@ -23,7 +23,7 @@ import sys
 import traceback
 from timeit import default_timer as timer
 
-import repology.config
+from repology.config import config
 from repology.database import Database
 from repology.logger import *
 from repology.packageproc import FillPackagesetVersions
@@ -76,23 +76,27 @@ def ProcessDatabase(options, logger, repoman, repositories_updated):
         db_logger.Log('(re)initializing database schema')
         database.CreateSchema()
 
+        db_logger.Log('committing changes')
+        database.Commit()
+
     if options.database:
         db_logger.Log('clearing the database')
         database.Clear()
 
         package_queue = []
         num_pushed = 0
+        start_time = timer()
 
         def PackageProcessor(packageset):
-            nonlocal package_queue, num_pushed
+            nonlocal package_queue, num_pushed, start_time
             FillPackagesetVersions(packageset)
             package_queue.extend(packageset)
 
-            if len(package_queue) >= 1000:
+            if len(package_queue) >= 10000:
                 database.AddPackages(package_queue)
                 num_pushed += len(package_queue)
                 package_queue = []
-                db_logger.Log('  pushed {} packages'.format(num_pushed))
+                db_logger.Log('  pushed {} packages, {:.2f} packages/second'.format(num_pushed, num_pushed / (timer() - start_time)))
 
         db_logger.Log('pushing packages to database')
         repoman.StreamDeserializeMulti(processor=PackageProcessor, reponames=options.reponames)
@@ -119,11 +123,13 @@ def ProcessDatabase(options, logger, repoman, repositories_updated):
     logger.Log('database processing complete')
 
 
-def ShowUnmatchedRules(options, logger, transformer):
+def ShowUnmatchedRules(options, logger, transformer, reliable):
     unmatched = transformer.GetUnmatchedRules()
     if len(unmatched):
         wlogger = logger.GetPrefixed('WARNING: ')
         wlogger.Log('unmatched rules detected!')
+        if not reliable:
+            wlogger.Log('this information is not reliable because not all repositories were updated!')
 
         for rule in unmatched:
             wlogger.Log(rule)
@@ -131,13 +137,15 @@ def ShowUnmatchedRules(options, logger, transformer):
 
 def Main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-S', '--statedir', default=repology.config.STATE_DIR, help='path to directory with repository state')
+    parser.add_argument('-S', '--statedir', default=config['STATE_DIR'], help='path to directory with repository state')
     parser.add_argument('-L', '--logfile', help='path to log file (log to stderr by default)')
-    parser.add_argument('-E', '--repos-path', default=repology.config.REPOS_PATH, help='path to reposotories config')
-    parser.add_argument('-U', '--rules-path', default=repology.config.RULES_PATH, help='path to name transformation rules yaml')
-    parser.add_argument('-D', '--dsn', default=repology.config.DSN, help='database connection params')
+    parser.add_argument('-E', '--repos-dir', default=config['REPOS_DIR'], help='path to directory with repository configs')
+    parser.add_argument('-U', '--rules-dir', default=config['RULES_DIR'], help='path to directory with rules')
+    parser.add_argument('-D', '--dsn', default=config['DSN'], help='database connection params')
 
     actions_grp = parser.add_argument_group('Actions')
+    actions_grp.add_argument('-l', '--list', action='store_true', help='list repositories repology will work on')
+
     actions_grp.add_argument('-f', '--fetch', action='store_true', help='fetching repository data')
     actions_grp.add_argument('-u', '--update', action='store_true', help='when fetching, allow updating (otherwise, only fetch once)')
     actions_grp.add_argument('-p', '--parse', action='store_true', help='parse, process and serialize repository data')
@@ -149,15 +157,20 @@ def Main():
 
     actions_grp.add_argument('-r', '--show-unmatched-rules', action='store_true', help='show unmatched rules when parsing')
 
-    parser.add_argument('reponames', default=repology.config.REPOSITORIES, metavar='repo|tag', nargs='*', help='repository or tag name to process')
+    parser.add_argument('reponames', default=config['REPOSITORIES'], metavar='repo|tag', nargs='*', help='repository or tag name to process')
     options = parser.parse_args()
+
+    repoman = RepositoryManager(options.repos_dir, options.statedir)
+
+    if options.list:
+        print('\n'.join(repoman.GetNames(reponames=options.reponames)))
+        return 0
+
+    transformer = PackageTransformer(options.rules_dir)
 
     logger = StderrLogger()
     if options.logfile:
         logger = FileLogger(options.logfile)
-
-    repoman = RepositoryManager(options.repos_path, options.statedir)
-    transformer = PackageTransformer(options.rules_path)
 
     repositories_updated = []
     repositories_not_updated = []
@@ -170,7 +183,7 @@ def Main():
         ProcessDatabase(options=options, logger=logger, repoman=repoman, repositories_updated=repositories_updated)
 
     if (options.parse or options.reprocess) and (options.show_unmatched_rules):
-        ShowUnmatchedRules(options=options, logger=logger, transformer=transformer)
+        ShowUnmatchedRules(options=options, logger=logger, transformer=transformer, reliable=repositories_not_updated == [])
 
     logger.Log('total time taken: {:.2f} seconds'.format((timer() - start)))
 

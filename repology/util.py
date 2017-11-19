@@ -1,4 +1,4 @@
-# Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
+# Copyright (C) 2016-2017 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
 #
@@ -28,8 +28,6 @@ def SplitPackageNameVersion(pkgname):
 
 
 def GetMaintainers(instr):
-    instr = instr.lower()
-
     tmpresult = None
     # match "name <mail>", but not "name <at> obfuscated"
     if re.search('<[^<>]{3,}>', instr):
@@ -64,15 +62,26 @@ def GetMaintainers(instr):
         # strip whitespace
         item = item.strip()
 
-        # deobfuscate
-        if item.find('@') == -1:
-            match = re.search('([^a-z0-9]+)at[^a-z0-9]', item)
-            if match:
-                item = item.replace(match.group(1) + 'at' + Reverse(match.group(1)), '@')
+        # one spacial case
+        if item.endswith(' (remove NO and SPAM)'):
+            item = item[:-21].replace('NO', '').replace('SPAM', '')
 
-            match = re.search('([^a-z0-9]+)dot[^a-z0-9]', item)
+        # lowercase
+        item = item.lower()
+
+        # deobfuscate
+        for word, symbol in (('at', '@'), ('underscore', '_'), ('dot', '.'), ('plus', '+')):
+            match = re.search('([^a-z0-9.]+)' + word + '[^a-z0-9.]', item)
             if match:
-                item = item.replace(match.group(1) + 'dot' + Reverse(match.group(1)), '.')
+                item = item.replace(match.group(1) + word + Reverse(match.group(1)), symbol)
+
+        for extrare in (r'agent smith \((.*)\)',):
+            match = re.search(extrare, item)
+            if match:
+                item = match.group(1)
+
+        for extrarepl in ((' @ google mail', '@gmail.com'), ):
+            item = item.replace(extrarepl[0], extrarepl[1])
 
         # also assumes non-empty items
         if item.find('@') != -1:

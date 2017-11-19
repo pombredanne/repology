@@ -1,0 +1,189 @@
+{% extends "layout.html" %}
+
+{% block title %}{{ super() }}: news{% endblock %}
+{% block header %}News{% endblock %}
+
+{% block content %}
+<div class="container">
+
+<article>
+	<h3 id="2017-11-16">2017-11-16</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='devuan_unstable') }}">Devuan</a> repositories.</li>
+	</ul>
+</article>
+
+<article>
+	<h3 id="2017-11-12">2017-11-12</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='aosc') }}">AOSC</a> repository (thanks <a href="https://github.com/gumblex">Dingyuan Wang</a>, <a href="https://github.com/l2dy">Zero King</a>).</li>
+	</ul>
+</article>
+
+<article>
+	<h3 id="2017-11-10">2017-11-10</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='parrot') }}">Parrot project</a> repository.</li>
+		<li>Added Rosa Server <a href="{{ url_for('repository', repo='rosa_server_6_9') }}">6.9</a> and <a href="{{ url_for('repository', repo='rosa_server_7_3') }}">7.3</a> repositories.</li>
+	</ul>
+</article>
+
+<article>
+	<h3 id="2017-10-25">2017-10-25</h3>
+	<ul>
+		<li>
+			<p>Implemented advanced metapackage filtering. Now instead of predefined filters (all/unique/widespread metapackages and metapackages present/not present/outdated in/unique in each repository) we have a flexible set of name, repository, category and spread filters, all available at a single <a href="{{ url_for('metapackages') }}">metapackages endpoint</a>. Metapackage name search is now integraded there as well and supports proper pagination.</p>
+			<p>Some examples of what you can now do with the filters:</p>
+			<ul>
+				<li>Lists of packages <a href="{{ url_for('metapackages', notinrepo='ubuntu_17_04', inrepo='ubuntu_18_04') }}">added</a> or <a href="{{ url_for('metapackages', inrepo='ubuntu_17_04', notinrepo='ubuntu_18_04') }}">removed</a> between Ubuntu Zesty and Ubuntu Bionic.</li>
+				<li>A list of <a href="{{ url_for('metapackages', notinrepo='gentoo', category='games', minspread=10) }}">moderately wide spread games not yet present in Gentoo</a></li>
+				<li>A list of <a href="{{ url_for('metapackages', inrepo='freebsd', notinrepo='dports', maxspread=1) }}">unique FreeBSD ports which haven't made their way into DragonFlyBSD DPorts</a>.</li>
+				<li>A list of <a href="{{ url_for('metapackages', inrepo='openbsd', category='games', maintainer='ports@openbsd.org', outdated=1) }}">outdated unmaintained games in OpenBSD</a>.</li>
+			</ul>
+		</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-10-17</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='vcpkg') }}">Vcpkg</a> repository.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-10-05</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='funtoo') }}">Funtoo</a> repository.</li>
+	</ul>
+</article>
+
+<article>
+	<h3 id="2017-09-20">2017-09-20</h3>
+	<ul>
+		<li>
+			<p>Huge rewrite of package classification system. This adds two new major features:</p>
+			<ul>
+				<li>
+					<p><span class="version version-devel">Devel</span> version class now exists in addition to <span class="version version-newest">newest</span>.</p>
+					<p>The idea is to track stable and devel/unstable version independently, e.g. if some repository packages <span class="version version-devel">2.0alpha1</span> version of some package, it no longer makes <span class="version version-newest">1.234</span> (which is latest known stable version) outdated in other repositories. Any repository may have newest and devel version at the same time, and is considered up to date if either is present. Devel versions may still become outdated as soon as newer devel version is available.</p>
+					<p>Note that devel status is set through rule system, so this feature is not available for too many packages yet. Reports on packages which have unstable branches are appreciated. We're also considering enabling this globally for all alpha/beta/pre versions.</p>
+					<p>To see this feature in action, check out <a href="{{ url_for('metapackage_information', name='glib') }}">glib</a> metapackage.</p>
+				</li>
+				<li>
+					<p><span class="version version-legacy">Legacy</span> version class now exists in addition to <span class="version version-outdated">outdated</span>.</p>
+					<p>The idea here is that if multiple versions of the same package exist in a repository, older ones are specifically preserved for purposes of compatibility and user convenience and are not meant to be updated. So, instead of <span class="version version-outdated">outdated</span>, they are now marked as <span class="version version-legacy">legacy</span> and are not accounted for outdated counts and metapackage lists.</li>
+					<p>To see this feature in action, check out <a href="{{ url_for('metapackage_information', name='phrack', _anchor='gentoo') }}">phrack</a> metapackage.</p>
+			</ul>
+			<p>Here's an example set of package versions to demonstrate these new features:</p>
+			<ul>
+				<li>Repository A: <span class="version version-devel">2.0beta1</span> <span class="version version-newest">1.1</span> (latest devel and latest normal versions)</li>
+				<li>Repository B: <span class="version version-outdated">2.0alpha1</span> <span class="version version-outdated">1.0</span> (both devel and normal versions outdated)</li>
+				<li>Repository C: <span class="version version-newest">1.1</span> <span class="version version-legacy">1.0</span> <span class="version version-legacy">0.5</span> (latest version and a set of legacy versions)</li>
+			</ul>
+			<p>This change introduced additional minor improvements, such as more accurate statistics counting (no more discrepancy between statistics and number of actual items in e.g. outdated metapackages list) and better badges rendering (ignored versions are no longer shown on the badge as long as there are other correct verions).</p>
+		</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-09-15</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='unitedrpms_28') }}">UnitedRPMs</a> repositories.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-09-08</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='linuxbrew') }}">Linuxbrew</a> repository.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-09-07</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='kaos') }}">KaOS</a> repository.</li>
+		<li>Added <a href="{{ url_for('repository', repo='mx_16') }}">MX Linux</a> repositories.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-09-04</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='openmandriva_cooker') }}">OpenMandriva</a> repositories.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-08-29</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='haikuports_master') }}">HaikuPorts</a> repositories.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-07-26</h3>
+	<ul>
+		<li>Added some <b>LEDE project</b> repositories.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-07-19</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='deepin_unstable') }}">Deepin</a> and <a href="{{ url_for('repository', repo='sparky_testing') }}">SparkyLinux</a> repositories.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-07-18</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='homebrew') }}">Homebrew</a> repository.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-07-17</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='mageia_6') }}">Mageia 6</a> repository.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-07-05</h3>
+	<ul>
+		<li>Split <b>GetDeb/PlayDeb</b> repository into a bunch of repositories: separate GetDeb and PlayDeb, Xenial/Yakkety/Zesty variants and add support for Testing repositories.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-07-04</h3>
+	<ul>
+		<li>Added <a href="{{ url_for('repository', repo='ravenports') }}">Ravenports</a> repository.</li>
+		<li>Added <a href="{{ url_for('repository', repo='linux_mint_18_2') }}">Linux Mint 18.2</a> repository.</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-06-07</h3>
+	<ul>
+		<li>
+			Added related metapackages page: for each metapackage, related ones are discovered
+			by matching homepage URLs. This helps to discover actual related packages (e.g. a GUI
+			package for some CLI utility from the save vendor) as well as candidates for merging.
+			Related packages are available through <b>Related</b> tab in the metapackage view.
+			See <a href="{{ url_for('metapackage_related', name='git') }}">git</a> for an example.
+		</li>
+	</ul>
+</article>
+
+<article>
+	<h3>2017-06-06</h3>
+	<ul>
+		<li>New functional <a href="{{ url_for('index') }}">title page</a>.</li>
+	</ul>
+</article>
+
+</div> {#- container #}
+{% endblock %}

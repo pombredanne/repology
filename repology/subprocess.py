@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
-#
-# Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
+# Copyright (C) 2016-2017 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
 #
@@ -20,7 +18,7 @@
 import subprocess
 
 
-def RunSubprocess(command, logger, shell=False, cwd=None):
+def RunSubprocess(command, logger, cwd=None):
     message = 'running "{}"'.format(' '.join(command)
                                     if isinstance(command, list)
                                     else command)
@@ -30,10 +28,11 @@ def RunSubprocess(command, logger, shell=False, cwd=None):
     logger.Log(message)
 
     with subprocess.Popen(command,
-                          shell=shell,
                           stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT,
                           universal_newlines=True,
+                          encoding='utf-8',
+                          errors='ignore',
                           cwd=cwd) as proc:
         for line in proc.stdout:
             logger.GetIndented().Log(line.strip())

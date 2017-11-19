@@ -7,23 +7,36 @@ Needed for core:
 - [Python](https://www.python.org/) 3.6+
 - Python module [pyyaml](http://pyyaml.org/)
 - Python module [requests](http://python-requests.org/)
-- Python module [rubymarshal](https://github.com/d9pouces/RubyMarshal)
+- [libversion](https://github.com/repology/libversion) library
 
 Needed for fetching/parsing specific repository data:
 
+- Python module [rubymarshal](https://github.com/d9pouces/RubyMarshal)
+- Python module [lxml](http://lxml.de/)
 - [wget](https://www.gnu.org/software/wget/)
 - [git](https://git-scm.com/)
 - [rsync](https://rsync.samba.org/)
 - [librpm](http://www.rpm.org/) and [pkg-config](https://www.freedesktop.org/wiki/Software/pkg-config/)
+- [tclsh](https://www.tcl.tk/) and [tcllib](https://www.tcl.tk/)
 
 Needed for web-application:
 
 - Python module [flask](http://flask.pocoo.org/)
+- Python module [pillow](https://pypi.python.org/pypi/Pillow)
 - Python module [psycopg](http://initd.org/psycopg/)
-- [https://www.postgresql.org/](PostgreSQL database) 9.5+
+- [PostgreSQL database](https://www.postgresql.org/) 10.0+
 
 Optional, for doing HTML validation when running tests:
 - Python module [pytidylib](https://pypi.python.org/pypi/pytidylib) and [tidy-html5](http://www.html-tidy.org/) library
+
+Optional, for checking schemas of configuration files:
+- Python module [voluptuous](https://pypi.python.org/pypi/voluptuous)
+
+Optional, for python code linding:
+- Python module [flake8](https://pypi.python.org/pypi/flake8)
+- Python module [flake8-buildins](https://pypi.python.org/pypi/flake8-builtins)
+- Python module [flake8-import-order](https://pypi.python.org/pypi/flake8-import-order)
+- Python module [flake8-quotes](https://pypi.python.org/pypi/flake8-quotes)
 
 ## Building
 
@@ -53,7 +66,7 @@ First, let's try to fetch some repository data and see if it works.
 No database is needed at this point.
 
 ```
-./repology-update --fetch --parse
+./repology-update.py --fetch --parse
 ```
 
 * ```--fetch``` tells the utility to fetch raw repository data
@@ -74,28 +87,29 @@ The utility allows filtering and several modes of operation, see
 
 ### Creating the database
 
-To run repology webapp you need PostgreSQL database.
+To run repology webapp you need a PostgreSQL database.
 
 First, ensure PostgreSQL server is installed and running,
-and execute the following SQL queries (usually you'll run
-```psql -U postgres``` for this):
+then execute the following commands to create a database for
+repology:
 
 ```
-CREATE DATABASE repology;
-CREATE USER repology WITH PASSWORD 'repology';
-GRANT ALL ON DATABASE repology TO repology;
+psql --username postgres -c "CREATE DATABASE repology"
+psql --username postgres -c "CREATE USER repology WITH PASSWORD 'repology'"
+psql --username postgres -c "GRANT ALL ON DATABASE repology TO repology"
+psql --username postgres --dbname repology -c "CREATE EXTENSION pg_trgm"
 ```
 
 now you can create database schema (tables, indexes etc.) with:
 
 ```
-./repology-update --initdb
+./repology-update.py --initdb
 ```
 
 and finally push parsed data into the database with:
 
 ```
-./repology-update --database
+./repology-update.py --database
 ```
 
 ### Running the webapp
@@ -114,7 +128,7 @@ testing.
 
 Alternatively, you may deploy the application in numerous ways,
 including mod_wsgi, uwsgi, fastcgi and plain CGI application. See
-[flask documentation on deployment](http://flask.pocoo.org/docs/0.11/deploying/)
+[flask documentation on deployment](http://flask.pocoo.org/docs/deploying/)
 for more info.
 
 ### Keeping up to date
@@ -125,5 +139,36 @@ database schema every time (unless it needs changing). Everything
 can be done with single command:
 
 ```
-./repology-app.py --fetch --update --parse --database
+./repology-update.py --fetch --update --parse --database
 ```
+
+### Link checker
+
+A separate utility exists to gather and refresh availability information
+for links (homepages and downloads) extracted by repology. After updating
+the database once, you may run
+
+```
+./repology-linkchecker.py
+```
+
+This will issue a HEAD (and if that fails, a GET) request for each link,
+and save the result (such as HTTP code and redirect information)
+in the database.
+
+Note that typical repology installation would know of hundreds of
+thousands of links so this may take time. Consult `--help` for a list
+of additional options. Typical Repology setup with regular update would
+run something like
+
+```
+./repology-linkchecker.py --unchecked --jobs 10
+```
+
+after each update to handle newly discovered links, and
+
+```
+./repology-linkchecker.py --checked --age 7 --jobs 10
+```
+
+weekly to refresh information of already known links in background.

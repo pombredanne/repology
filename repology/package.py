@@ -1,4 +1,4 @@
-# Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
+# Copyright (C) 2016-2017 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
 #
@@ -19,25 +19,20 @@
 import re
 
 
-class PackageVersionClass:
+class VersionClass:
     newest = 1
     outdated = 2
     ignored = 3
+    unique = 4
+    devel = 5
+    legacy = 6
 
 
-class RepositoryVersionClass:
-    newest = 1
-    outdated = 2
-    mixed = 3
-    ignored = 4
-    lonely = 5
-
-
-class PackageMergeConflict(Exception):
+class PackageSanityCheckProblem(Exception):
     pass
 
 
-class PackageSanityCheckFailure(Exception):
+class PackageSanityCheckFailure(PackageSanityCheckProblem):
     pass
 
 
@@ -52,7 +47,6 @@ class Package:
 
         'version',
         'origversion',
-        'effversion',
         'versionclass',
 
         'maintainers',
@@ -65,13 +59,21 @@ class Package:
         'ignore',
         'shadow',
         'ignoreversion',
+        'devel',
+        'verfixed',
+
+        'flavors',
+
+        'extrafields',
     ]
 
     def __init__(self, repo=None, family=None, subrepo=None,
                  name=None, effname=None,
-                 version=None, origversion=None, effversion=None, versionclass=None,
+                 version=None, origversion=None, versionclass=None,
                  maintainers=None, category=None, comment=None, homepage=None, licenses=None, downloads=None,
-                 ignore=False, shadow=False, ignoreversion=False):
+                 ignore=False, shadow=False, ignoreversion=False, devel=False, verfixed=False,
+                 flavors=None,
+                 extrafields=None):
         self.repo = repo
         self.family = family
         self.subrepo = subrepo
@@ -81,7 +83,6 @@ class Package:
 
         self.version = version
         self.origversion = origversion
-        self.effversion = effversion
         self.versionclass = versionclass
 
         self.maintainers = maintainers if maintainers else []
@@ -94,78 +95,131 @@ class Package:
         self.ignore = ignore
         self.shadow = shadow
         self.ignoreversion = ignoreversion
+        self.devel = devel
+        self.verfixed = verfixed
 
-    def IsMergeable(self, other):
+        self.flavors = flavors if flavors else []
+
+        self.extrafields = extrafields if extrafields else {}
+
+    def TryMerge(self, other):
         for slot in self.__slots__:
             self_val = getattr(self, slot)
             other_val = getattr(other, slot)
 
-            if self_val is not None and self_val != [] and other_val is not None and other_val != [] and self_val != other_val:
+            if self_val is None or self_val == [] or self_val == {}:
+                setattr(self, slot, other_val)
+            elif other_val is None or other_val == [] or other_val == {}:
+                pass
+            elif self_val != other_val:
                 return False
 
         return True
 
-    def Merge(self, other):
-        for slot in self.__slots__:
-            self_val = getattr(self, slot)
-            other_val = getattr(other, slot)
+    def CheckSanity(self, transformed=True):
+        # checks
+        def NoNewlines(value):
+            return 'contains newlines' if '\n' in value else ''
 
-            if self_val is None or self_val == []:
-                setattr(self, slot, other_val)
-            elif other_val is None or other_val == []:
-                setattr(self, slot, self_val)
-            elif self_val != other_val:
-                raise PackageMergeConflict('{}: {} != {}'.format(self.name, self_val, other_val))
+        def NoSlashes(value):
+            return 'contains slashes' if '/' in value else ''
 
-    def CheckSanity(self):
-        def CheckStr(value, name, no_newlines=False, no_whitespace=False, non_empty=False, stripped=False, alphanumeric=False, lowercase=False):
+        def Stripped(value):
+            return 'is not stripped' if value != value.strip() else ''
+
+        def Alphanumeric(value):
+            return 'contains not allowed symbols' if not re.fullmatch('[a-zA-Z0-9_-]+', value) else ''
+
+        def Lowercase(value):
+            return 'is not lowercase' if value != value.lower() else ''
+
+        def NoWhitespace(value):
+            return 'contains whitespace' if re.search('[ \t\n\r]', value) else ''
+
+        def NonEmpty(value):
+            return 'is empty' if value == '' else ''
+
+        # checkers
+        def CheckBool(value, name):
+            if not isinstance(value, bool):
+                raise PackageSanityCheckFailure('{}: {} is not a boolean'.format(self.name, name))
+
+        def CheckStr(value, name, *checks):
             if not isinstance(value, str):
                 raise PackageSanityCheckFailure('{}: {} is not a string'.format(self.name, name))
-            if no_newlines and '\n' in value:
-                raise PackageSanityCheckFailure('{}: {} contains newlines: "{}"'.format(self.name, name, value))
-            if stripped and value != value.strip():
-                raise PackageSanityCheckFailure('{}: {} not stripped: "{}"'.format(self.name, name, value))
-            if alphanumeric and re.match('[^a-zA-Z0-9_-]', value):
-                raise PackageSanityCheckFailure('{}: {} contains not allowed symbols: "{}"'.format(self.name, name, value))
-            if lowercase and value != value.lower():
-                raise PackageSanityCheckFailure('{}: {} not lowercase: "{}"'.format(self.name, name, value))
-            if no_whitespace and (' ' in value or '\t' in value or '\n' in value or '\r' in value):
-                raise PackageSanityCheckFailure('{}: {} contains whitespace: "{}"'.format(self.name, name, value))
-            if non_empty and value == '':
-                raise PackageSanityCheckFailure('{}: {} is empty'.format(self.name, name))
+            for check in checks:
+                result = check(value)
+                if result:
+                    raise PackageSanityCheckProblem('{}: {} {}: "{}"'.format(self.name, name, result, value))
 
-        def CheckList(value, name, no_newlines=False, no_whitespace=False, non_empty=False, stripped=False, alphanumeric=False, lowercase=False):
+        def CheckList(value, name, *checks):
             if not isinstance(value, list):
                 raise PackageSanityCheckFailure('{}: {} is not a list'.format(self.name, name))
-            for subvalue in value:
-                CheckStr(subvalue, name, no_newlines=no_newlines, no_whitespace=no_whitespace, non_empty=non_empty, stripped=stripped, alphanumeric=alphanumeric, lowercase=lowercase)
+            for element in value:
+                CheckStr(element, name, *checks)
 
-        CheckStr(self.repo, 'repo', no_newlines=True, stripped=True, alphanumeric=True, lowercase=True)
-        CheckStr(self.family, 'family', no_newlines=True, stripped=True, alphanumeric=True, lowercase=True)
+        def CheckDict(value, name, *checks):
+            if not isinstance(value, dict):
+                raise PackageSanityCheckFailure('{}: {} is not a dict'.format(self.name, name))
+            for element in value.values():
+                CheckStr(element, name, *checks)
+
+        CheckStr(self.repo, 'repo', NoNewlines, Stripped, Alphanumeric, Lowercase)
+        CheckStr(self.family, 'family', NoNewlines, Stripped, Alphanumeric, Lowercase)
         if self.subrepo is not None:
-            CheckStr(self.subrepo, 'subrepo', no_newlines=True, stripped=True, alphanumeric=True, lowercase=True)
+            CheckStr(self.subrepo, 'subrepo', NoNewlines, Stripped)
 
-        CheckStr(self.name, 'name', no_newlines=True, stripped=True)
-        if self.effname is not None:
-            CheckStr(self.effname, 'effname', no_newlines=True, stripped=True)
+        CheckStr(self.name, 'name', NoNewlines, Stripped, NonEmpty)
+        if transformed or self.effname is not None:
+            CheckStr(self.effname, 'effname', NoNewlines, Stripped, NonEmpty, NoSlashes)
 
-        CheckStr(self.version, 'version', no_newlines=True, stripped=True)
+        CheckStr(self.version, 'version', NoNewlines, Stripped, NonEmpty)
         if self.origversion is not None:
-            CheckStr(self.origversion, 'origversion', no_newlines=True, stripped=True)
+            CheckStr(self.origversion, 'origversion', NoNewlines, Stripped)
 
-        CheckList(self.maintainers, 'maintainers', no_newlines=True, stripped=True)
+        CheckList(self.maintainers, 'maintainers', NoNewlines, Stripped, NoWhitespace, NoSlashes, NonEmpty)
         if self.category is not None:
-            CheckStr(self.category, 'category', no_newlines=True, stripped=True)
+            CheckStr(self.category, 'category', NoNewlines, Stripped, NonEmpty)
         if self.comment is not None:
-            CheckStr(self.comment, 'comment', no_newlines=True, stripped=True)
+            CheckStr(self.comment, 'comment', NoNewlines, Stripped, NonEmpty)
         if self.homepage is not None:
-            CheckStr(self.homepage, 'homepage', no_whitespace=True)
-        CheckList(self.licenses, 'licenses', no_newlines=True, stripped=True)
-        CheckList(self.downloads, 'downloads', no_whitespace=True)
+            CheckStr(self.homepage, 'homepage', NoWhitespace, NonEmpty)
+        CheckList(self.licenses, 'licenses', NoNewlines, Stripped, NonEmpty)
+        CheckList(self.downloads, 'downloads', NoWhitespace, NoNewlines, NonEmpty)
 
-    def Sanitize(self):
-        if self.maintainers:
+        CheckBool(self.ignore, 'ignore')
+        CheckBool(self.shadow, 'shadow')
+        CheckBool(self.ignoreversion, 'ignoreversion')
+        CheckBool(self.devel, 'devel')
+        CheckBool(self.verfixed, 'verfixed')
+
+        CheckList(self.flavors, 'flavors', Alphanumeric, Lowercase)
+
+        CheckDict(self.extrafields, 'extrafields', NoWhitespace, NonEmpty)
+
+    def Normalize(self):
+        # normalize homepage (currently adds / to url which points to host)
+        if self.homepage:
+            match = re.fullmatch('(https?://)([^/]+)(/.*)?', self.homepage, re.IGNORECASE)
+
+            if match:
+                schema = match.group(1).lower()
+                hostname = match.group(2).lower()
+                path = match.group(3) or '/'
+
+                self.homepage = schema + hostname + path
+
+        # unicalize and sort maintainers list
+        if len(self.maintainers) > 1:
             self.maintainers = sorted(set(self.maintainers))
+
+    def CheckFormat(self):
+        # check
+        for slot in self.__slots__:
+            if not hasattr(self, slot):
+                return False
+
+        return True
 
     @property
     def __dict__(self):

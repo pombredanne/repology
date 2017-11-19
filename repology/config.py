@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-#
 # Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
@@ -19,10 +17,14 @@
 
 import os
 
+__all__ = ['config']
+
+config = {}
+
 
 def __load_config(path):
     with open(path) as f:
-        exec(compile(f.read(), path, 'exec'), globals())
+        exec(compile(f.read(), path, 'exec'), globals(), config)
 
 
 def __load_configs():

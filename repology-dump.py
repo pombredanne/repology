@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
+# Copyright (C) 2016-2017 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
 #
@@ -20,7 +20,7 @@
 import argparse
 import os
 
-import repology.config
+from repology.config import config
 from repology.filters import *
 from repology.logger import *
 from repology.package import *
@@ -28,37 +28,28 @@ from repology.packageproc import *
 from repology.repoman import RepositoryManager
 
 
-def PackageVersionClass2Letter(value):
-    if value == PackageVersionClass.newest:
-        return 'N'
-    elif value == PackageVersionClass.outdated:
-        return 'O'
-    elif value == PackageVersionClass.ignored:
+def VersionClass2Letter(value):
+    if value == VersionClass.ignored:
         return 'I'
-    else:
-        return '?'
-
-
-def RepositoryVersionClass2Letter(value):
-    if value == RepositoryVersionClass.newest:
+    elif value == VersionClass.unique:
+        return 'U'
+    elif value == VersionClass.devel:
+        return 'D'
+    elif value == VersionClass.newest:
         return 'N'
-    elif value == RepositoryVersionClass.outdated:
-        return 'O'
-    elif value == RepositoryVersionClass.mixed:
-        return 'M'
-    elif value == RepositoryVersionClass.ignored:
-        return 'I'
-    elif value == RepositoryVersionClass.lonely:
+    elif value == VersionClass.legacy:
         return 'L'
+    elif value == VersionClass.outdated:
+        return 'O'
     else:
         return '?'
 
 
 def Main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-S', '--statedir', default=repology.config.STATE_DIR, help='path to directory with repository state')
+    parser.add_argument('-S', '--statedir', default=config['STATE_DIR'], help='path to directory with repository state')
     parser.add_argument('-L', '--logfile', help='path to log file (log to stderr by default)')
-    parser.add_argument('-E', '--repos-path', default=repology.config.REPOS_PATH, help='path to reposotories config')
+    parser.add_argument('-E', '--repos-dir', default=config['REPOS_DIR'], help='path directory with reposotory configs')
     parser.add_argument('-M', '--mode', choices=['batch', 'stream'], default='stream', help='processing mode')
 
     filters_grp = parser.add_argument_group('Filters')
@@ -72,10 +63,10 @@ def Main():
     filters_grp.add_argument('--outdated-in-repository', help='filter by outdatedness in repository')
 
     parser.add_argument('-D', '--dump', choices=['packages', 'summaries'], default='packages', help='dump mode')
-    parser.add_argument('-f', '--fields', default='effname,repo', help='fields to list for the package')
+    parser.add_argument('-f', '--fields', default='repo,effname,version', help='fields to list for the package')
     parser.add_argument('-s', '--field-separator', default=' ', help='field separator')
 
-    parser.add_argument('reponames', default=repology.config.REPOSITORIES, metavar='repo|tag', nargs='*', help='repository or tag name to process')
+    parser.add_argument('reponames', default=config['REPOSITORIES'], metavar='repo|tag', nargs='*', help='repository or tag name to process')
     options = parser.parse_args()
 
     logger = StderrLogger()
@@ -104,7 +95,7 @@ def Main():
     if not options.no_shadow:
         filters.append(ShadowFilter())
 
-    repoman = RepositoryManager(options.repos_path, options.statedir)
+    repoman = RepositoryManager(options.repos_dir, options.statedir)
 
     def PackageProcessor(packageset):
         FillPackagesetVersions(packageset)
@@ -123,14 +114,13 @@ def Main():
                 )
         if options.dump == 'summaries':
             print(packageset[0].effname)
-            summaries = PackagesetToSummaries(packageset)
+            best_pkg_by_repo = PackagesetToBestByRepo(packageset)
             for reponame in repoman.GetNames(options.reponames):
-                if reponame in summaries:
-                    print('  {}: {} ({}) *{}'.format(
+                if reponame in best_pkg_by_repo:
+                    print('  {}: {} ({})'.format(
                         reponame,
-                        summaries[reponame]['version'],
-                        RepositoryVersionClass2Letter(summaries[reponame]['versionclass']),
-                        summaries[reponame]['numpackages'],
+                        best_pkg_by_repo[reponame].version,
+                        VersionClass2Letter(best_pkg_by_repo[reponame].versionclass)
                     ))
 
     if options.mode == 'stream':

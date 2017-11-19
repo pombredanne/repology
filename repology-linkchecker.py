@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
+# Copyright (C) 2016-2017 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
 #
@@ -27,7 +27,7 @@ import urllib.parse
 
 import requests
 
-import repology.config
+from repology.config import config
 from repology.database import Database
 from repology.logger import FileLogger, StderrLogger
 
@@ -35,6 +35,10 @@ from repology.logger import FileLogger, StderrLogger
 def GetHTTPLinkStatus(url, timeout):
     try:
         response = requests.head(url, allow_redirects=True, headers={'user-agent': 'Repology link checker/0'}, timeout=timeout)
+
+        # fallback to GET
+        if response.status_code != 200:
+            response = requests.get(url, allow_redirects=True, headers={'user-agent': 'Repology link checker/0'}, timeout=timeout)
 
         redirect = None
         size = None
@@ -47,7 +51,7 @@ def GetHTTPLinkStatus(url, timeout):
             # resolve permanent (and only permament!) redirect chain
             for h in response.history:
                 if h.status_code == 301:
-                    location = h.headers.get('location')
+                    location = urllib.parse.urljoin(h.url, h.headers.get('location'))
 
         # handle size
         if response.status_code == 200:
@@ -98,36 +102,57 @@ def GetLinkStatuses(urls, delay, timeout):
     return results
 
 
-def LinkProcessorWorker(queue, workerid, options, logger):
-    database = Database(options.dsn, readonly=False)
-
+def LinkProcessingWorker(readqueue, writequeue, workerid, options, logger):
     logger = logger.GetPrefixed('worker{}: '.format(workerid))
 
     logger.Log('Worker spawned')
 
+    def Slicer(pack):
+        for i in range(0, len(pack), options.packsize):
+            yield pack[i:i + options.packsize]
+
     while True:
-        pack = queue.get()
+        pack = readqueue.get()
         if pack is None:
             logger.Log('Worker exiting')
             return
 
-        logger.Log('Processing {} urls ({}..{})'.format(len(pack), pack[0], pack[-1]))
-        for result in GetLinkStatuses(pack, delay=options.delay, timeout=options.timeout):
-            url, status, redirect, size, location = result
+        logger.Log('Processing {} url(s) ({} .. {})'.format(len(pack), pack[0], pack[-1]))
+
+        for subpack in Slicer(pack):
+            writequeue.put(GetLinkStatuses(subpack, delay=options.delay, timeout=options.timeout))
+
+        logger.Log('Done processing {} url(s) ({} .. {})'.format(len(pack), pack[0], pack[-1]))
+
+
+def LinkUpdatingWorker(queue, options, logger):
+    database = Database(options.dsn, readonly=False)
+
+    logger = logger.GetPrefixed('writer: ')
+
+    logger.Log('Writer spawned')
+
+    while True:
+        pack = queue.get()
+        if pack is None:
+            logger.Log('Writer exiting')
+            return
+
+        for url, status, redirect, size, location in pack:
             database.UpdateLinkStatus(url=url, status=status, redirect=redirect, size=size, location=location)
 
         database.Commit()
-        logger.Log('Done processing {} urls ({}..{})'.format(len(pack), pack[0], pack[-1]))
+        logger.Log('Updated {} url(s) ({} .. {})'.format(len(pack), pack[0][0], pack[-1][0]))
 
 
 def Main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--dsn', default=repology.config.DSN, help='database connection params')
+    parser.add_argument('--dsn', default=config['DSN'], help='database connection params')
     parser.add_argument('--logfile', help='path to log file (log to stderr by default)')
 
     parser.add_argument('--timeout', type=float, default=60.0, help='timeout for link requests in seconds')
     parser.add_argument('--delay', type=float, default=3.0, help='delay between requests to one host')
-    parser.add_argument('--age', type=int, default=365, help='min age for recheck in days')
+    parser.add_argument('--age', type=int, default=0, help='min age for recheck in days')
     parser.add_argument('--packsize', type=int, default=128, help='pack size for link processing')
     parser.add_argument('--maxpacksize', type=int, help='max pack size for link processing (useful to skip large hosts)')
     parser.add_argument('--jobs', type=int, default=1, help='number of parallel jobs')
@@ -140,10 +165,15 @@ def Main():
     options = parser.parse_args()
 
     logger = FileLogger(options.logfile) if options.logfile else StderrLogger()
-    database = Database(options.dsn, readonly=True)
+    database = Database(options.dsn, readonly=True, autocommit=True)
 
-    queue = multiprocessing.Queue(1)
-    processpool = [multiprocessing.Process(target=LinkProcessorWorker, args=(queue, i, options, logger)) for i in range(options.jobs)]
+    readqueue = multiprocessing.Queue(10)
+    writequeue = multiprocessing.Queue(10)
+
+    writer = multiprocessing.Process(target=LinkUpdatingWorker, args=(writequeue, options, logger))
+    writer.start()
+
+    processpool = [multiprocessing.Process(target=LinkProcessingWorker, args=(readqueue, writequeue, i, options, logger)) for i in range(options.jobs)]
     for process in processpool:
         process.start()
 
@@ -153,7 +183,7 @@ def Main():
     prev_url = None
     while True:
         # Get pack of links
-        logger.Log('Requesting pack of urls'.format(prev_url))
+        logger.Log('Requesting pack of urls')
         urls = database.GetLinksForCheck(
             after=prev_url,
             prefix=options.prefix,  # no limit by default
@@ -186,18 +216,22 @@ def Main():
         if options.maxpacksize and len(urls) > options.maxpacksize:
             logger.Log('Skipping {} urls ({}..{}), exceeds max pack size'.format(len(urls), urls[0], urls[-1]))
         else:
-            queue.put(urls)
+            readqueue.put(urls)
             logger.Log('Enqueued {} urls ({}..{})'.format(len(urls), urls[0], urls[-1]))
 
         prev_url = urls[-1]
 
     logger.Log('Waiting for child processes to exit')
 
+    # close workers
     for process in processpool:
-        queue.put(None)
-
+        readqueue.put(None)
     for process in processpool:
         process.join()
+
+    # close writer
+    writequeue.put(None)
+    writer.join()
 
     logger.Log('Done')
 

@@ -1,4 +1,4 @@
-# Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
+# Copyright (C) 2016-2017 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
 #
@@ -16,6 +16,7 @@
 # along with repology.  If not, see <http://www.gnu.org/licenses/>.
 
 import datetime
+import json
 
 import psycopg2
 
@@ -75,43 +76,49 @@ class MetapackageRequest:
 
         self.name_substring = None
 
-        self.effname_sorting = None
-        self.limit = None
-
         # maintainer (maintainer_metapackages)
         self.maintainer = None
         self.maintainer_outdated = False
 
         # num families (metapackage_repocounts)
-        self.morefamilies = None
-        self.lessfamilies = None
+        self.minfamilies = None
+        self.maxfamilies = None
 
         # repos (repo_metapackages)
-        self.repos = None
-        self.repos_outdated = False
+        self.inrepo = None
+        self.notinrepo = None
 
-        # not repos (repo_metapackages + having)
-        self.repo_not = None
+        # category
+        self.category = None
 
-    def NameStarting(self, name):
+        # flags
+        self.outdated = None
+
+        # other
+        self.limit = None
+
+    def Bound(self, bound):
+        if not bound:
+            pass
+        elif bound.startswith('..'):
+            self.NameTo(bound[2:])
+        else:
+            self.NameFrom(bound)
+
+    def NameFrom(self, name):
         if self.namecond:
             raise RuntimeError('duplicate effname condition')
-        self.namecond = '>='
-        self.namebound = name
+        if name is not None:
+            self.namecond = '>='
+            self.namebound = name
         self.nameorder = 'ASC'
 
-    def NameAfter(self, name):
+    def NameTo(self, name):
         if self.namecond:
             raise RuntimeError('duplicate effname condition')
-        self.namecond = '>'
-        self.namebound = name
-        self.nameorder = 'ASC'
-
-    def NameBefore(self, name):
-        if self.namecond:
-            raise RuntimeError('duplicate effname condition')
-        self.namecond = '<'
-        self.namebound = name
+        if name is not None:
+            self.namecond = '<='
+            self.namebound = name
         self.nameorder = 'DESC'
 
     def NameSubstring(self, substring):
@@ -124,84 +131,81 @@ class MetapackageRequest:
             raise RuntimeError('duplicate maintainer condition')
         self.maintainer = maintainer
 
-    def OutdatedForMaintainer(self, maintainer):
-        if self.maintainer:
-            raise RuntimeError('duplicate maintainer condition')
-        self.maintainer = maintainer
-        self.maintainer_outdated = True
-
     def InRepo(self, repo):
-        if self.repos and repo not in self.repos:
+        if self.inrepo:
             raise RuntimeError('duplicate repository condition')
 
-        self.repos = set((repo,))
-
-    def InAnyRepo(self, repos):
-        if self.repos:
-            for currentrepo in self.repos:
-                if currentrepo not in repos:
-                    raise RuntimeError('duplicate repository condition')
-        else:
-            self.repos = set(repos)
-
-    def OutdatedInRepo(self, repo):
-        if self.repos and repo not in self.repos:
-            raise RuntimeError('duplicate repository condition')
-
-        self.repos = set((repo,))
-        self.repos_outdated = True
+        self.inrepo = repo
 
     def NotInRepo(self, repo):
-        if self.repo_not:
+        if self.notinrepo:
             raise RuntimeError('duplicate not-in-repository condition')
-        self.repo_not = repo
+        self.notinrepo = repo
 
-    def MoreFamilies(self, num):
-        if self.morefamilies:
+    def Category(self, category):
+        if self.category:
+            raise RuntimeError('duplicate category condition')
+        self.category = category
+
+    def MinFamilies(self, num):
+        if self.minfamilies:
             raise RuntimeError('duplicate more families condition')
-        self.morefamilies = num
+        self.minfamilies = num
 
-    def LessFamilies(self, num):
-        if self.lessfamilies:
+    def MaxFamilies(self, num):
+        if self.maxfamilies:
             raise RuntimeError('duplicate less families condition')
-        self.lessfamilies = num
+        self.maxfamilies = num
 
     def Limit(self, limit):
         if self.limit:
             raise RuntimeError('duplicate limit')
         self.limit = limit
 
+    def Outdated(self):
+        self.outdated = True
+
     def GetQuery(self):
         tables = set()
         where = AndQuery()
         having = AndQuery()
 
+        outdated_handled = False
+
         # table joins and conditions
         if self.maintainer:
             tables.add('maintainer_metapackages')
-            if self.maintainer_outdated:
-                where.Append('maintainer_metapackages.maintainer = %s AND maintainer_metapackages.num_packages_outdated > 0', self.maintainer)
-            else:
-                where.Append('maintainer_metapackages.maintainer = %s', self.maintainer)
+            where.Append('maintainer_metapackages.maintainer = %s', self.maintainer)
+            if self.outdated:
+                outdated_handled = True
+                where.Append('maintainer_metapackages.num_packages_outdated > 0')
 
-        if self.morefamilies:
+        if self.minfamilies:
             tables.add('metapackage_repocounts')
-            where.Append('metapackage_repocounts.num_families >= %s', self.morefamilies)
+            where.Append('metapackage_repocounts.num_families >= %s', self.minfamilies)
 
-        if self.lessfamilies:
+        if self.maxfamilies:
             tables.add('metapackage_repocounts')
-            where.Append('metapackage_repocounts.num_families <= %s', self.lessfamilies)
+            where.Append('metapackage_repocounts.num_families <= %s', self.maxfamilies)
 
-        if self.repos:
+        if self.inrepo:
             tables.add('repo_metapackages')
-            if self.repos_outdated:
-                where.Append('repo_metapackages.repo in (' + ','.join(['%s'] * len(self.repos)) + ') and repo_metapackages.num_outdated > 0', *self.repos)
-            else:
-                where.Append('repo_metapackages.repo in (' + ','.join(['%s'] * len(self.repos)) + ')', *self.repos)
+            where.Append('repo_metapackages.repo = %s', self.inrepo)
+            if self.outdated:
+                where.Append('repo_metapackages.num_packages_outdated > 0')
+                outdated_handled = True
 
-        if self.repo_not:
+        if self.notinrepo:
             tables.add('repo_metapackages as repo_metapackages1')
-            having.Append('count(nullif(repo_metapackages1.repo = %s, false)) = 0', self.repo_not)
+            having.Append('count(*) FILTER (WHERE repo_metapackages1.repo = %s) = 0', self.notinrepo)
+
+        if self.category:
+            tables.add('category_metapackages')
+            where.Append('category_metapackages.category = %s', self.category)
+
+        if self.outdated and not outdated_handled:
+            tables.add('repo_metapackages')
+            where.Append('repo_metapackages.num_packages_outdated > 0')
 
         # effname conditions
         if self.namecond and self.namebound:
@@ -248,31 +252,37 @@ class Database:
         self.cursor.execute('DROP TABLE IF EXISTS totals_history CASCADE')
         self.cursor.execute('DROP TABLE IF EXISTS links CASCADE')
         self.cursor.execute('DROP TABLE IF EXISTS problems CASCADE')
+        self.cursor.execute('DROP TABLE IF EXISTS reports CASCADE')
 
         self.cursor.execute("""
             CREATE TABLE packages (
-                repo varchar(255) not null,
-                family varchar(255) not null,
-                subrepo varchar(255),
+                repo text not null,
+                family text not null,
+                subrepo text,
 
-                name varchar(255) not null,
-                effname varchar(255) not null,
+                name text not null,
+                effname text not null,
 
-                version varchar(255) not null,
-                origversion varchar(255),
-                effversion varchar(255),
+                version text not null,
+                origversion text,
                 versionclass smallint,
 
-                maintainers varchar(1024)[],
-                category varchar(255),
+                maintainers text[],
+                category text,
                 comment text,
-                homepage varchar(1024),
-                licenses varchar(1024)[],
-                downloads varchar(1024)[],
+                homepage text,
+                licenses text[],
+                downloads text[],
 
                 ignorepackage bool not null,
                 shadow bool not null,
-                ignoreversion bool not null
+                ignoreversion bool not null,
+                devel bool not null,
+                verfixed bool not null,
+
+                flavors text[],
+
+                extrafields jsonb not null
             )
         """)
 
@@ -280,15 +290,34 @@ class Database:
             CREATE INDEX ON packages(effname)
         """)
 
+        # This should be used in queries instead of packages table
+        # everywhere where shadow metapackages need to be ignored
+        #
+        # XXX: may also investigate using NOT IN (HAVING bool_and())
+        # variant of this query
+        self.cursor.execute("""
+            CREATE VIEW packages_ns AS
+                SELECT * FROM PACKAGES
+                WHERE effname IN (
+                    SELECT effname
+                    FROM packages
+                    GROUP BY effname
+                    HAVING NOT bool_and(shadow)
+                )
+        """)
+
         # repositories
         self.cursor.execute("""
             CREATE TABLE repositories (
-                name varchar(255) not null primary key,
+                name text not null primary key,
 
                 num_packages integer not null default 0,
                 num_packages_newest integer not null default 0,
                 num_packages_outdated integer not null default 0,
                 num_packages_ignored integer not null default 0,
+                num_packages_unique integer not null default 0,
+                num_packages_devel integer not null default 0,
+                num_packages_legacy integer not null default 0,
 
                 num_metapackages integer not null default 0,
                 num_metapackages_unique integer not null default 0,
@@ -332,81 +361,7 @@ class Database:
             )
         """)
 
-        # repo_metapackages
-        self.cursor.execute("""
-            CREATE MATERIALIZED VIEW repo_metapackages
-                AS
-                    SELECT
-                        repo,
-                        effname,
-                        count(nullif(versionclass=1, false)) AS num_newest,
-                        count(nullif(versionclass=2, false)) AS num_outdated,
-                        count(nullif(versionclass=3, false)) AS num_ignored
-                    FROM packages
-                    WHERE effname IN (
-                        SELECT
-                            effname
-                        FROM packages
-                        GROUP BY effname
-                        HAVING count(nullif(shadow, true)) > 0
-                    )
-                    GROUP BY effname,repo
-                WITH DATA
-        """)
-
-        self.cursor.execute("""
-            CREATE UNIQUE INDEX ON repo_metapackages(repo, effname)
-        """)
-
-        self.cursor.execute("""
-            CREATE INDEX ON repo_metapackages(effname)
-        """)
-
-        # maintainer_metapackages
-        self.cursor.execute("""
-            CREATE MATERIALIZED VIEW maintainer_metapackages
-                AS
-                    SELECT
-                        unnest(maintainers) as maintainer,
-                        effname,
-                        count(1) AS num_packages,
-                        count(nullif(versionclass = 1, false)) AS num_packages_newest,
-                        count(nullif(versionclass = 2, false)) AS num_packages_outdated,
-                        count(nullif(versionclass = 3, false)) AS num_packages_ignored
-                    FROM packages
-                    GROUP BY maintainer, effname
-                WITH DATA
-        """)
-
-        self.cursor.execute("""
-            CREATE UNIQUE INDEX ON maintainer_metapackages(maintainer, effname)
-        """)
-
-        self.cursor.execute("""
-            CREATE INDEX ON maintainer_metapackages(effname)
-        """)
-
-        # maintainers
-        self.cursor.execute("""
-            CREATE MATERIALIZED VIEW maintainers AS
-                SELECT
-                    unnest(maintainers) AS maintainer,
-                    count(1) AS num_packages,
-                    count(DISTINCT effname) AS num_metapackages,
-                    count(nullif(versionclass = 1, false)) AS num_packages_newest,
-                    count(nullif(versionclass = 2, false)) AS num_packages_outdated,
-                    count(nullif(versionclass = 3, false)) AS num_packages_ignored
-                FROM packages
-                GROUP BY maintainer
-                ORDER BY maintainer
-            WITH DATA
-        """)
-
-        self.cursor.execute("""
-            CREATE UNIQUE INDEX ON maintainers(maintainer)
-        """)
-
-        # repo counts
+        # repo counts per metapackage
         self.cursor.execute("""
             CREATE MATERIALIZED VIEW metapackage_repocounts AS
                 SELECT
@@ -425,10 +380,156 @@ class Database:
         self.cursor.execute('CREATE INDEX ON metapackage_repocounts(num_families)')
         self.cursor.execute('CREATE INDEX ON metapackage_repocounts(shadow_only, num_families)')
 
+        # package class counts aggregated for each metapackage/repo
+        self.cursor.execute("""
+            CREATE MATERIALIZED VIEW repo_metapackages
+                AS
+                    SELECT
+                        repo,
+                        effname,
+                        count(*) AS num_packages,
+                        count(*) FILTER (WHERE versionclass = 1) AS num_packages_newest,
+                        count(*) FILTER (WHERE versionclass = 2) AS num_packages_outdated,
+                        count(*) FILTER (WHERE versionclass = 3) AS num_packages_ignored,
+                        count(*) FILTER (WHERE versionclass = 4) AS num_packages_unique,
+                        count(*) FILTER (WHERE versionclass = 5) AS num_packages_devel,
+                        count(*) FILTER (WHERE versionclass = 6) AS num_packages_legacy,
+                        max(num_families) = 1 as unique
+                    FROM packages INNER JOIN metapackage_repocounts USING(effname)
+                    WHERE NOT shadow_only
+                    GROUP BY effname,repo
+                WITH DATA
+        """)
+
+        self.cursor.execute("""
+            CREATE UNIQUE INDEX ON repo_metapackages(repo, effname)
+        """)
+
+        self.cursor.execute("""
+            CREATE INDEX ON repo_metapackages(effname)
+        """)
+
+        self.cursor.execute("""
+            CREATE INDEX repo_metapackages_effname_trgm ON repo_metapackages USING gin (effname gin_trgm_ops)
+        """)
+
+        # metapackages per category
+        self.cursor.execute("""
+            CREATE MATERIALIZED VIEW category_metapackages
+                AS
+                    SELECT
+                        category,
+                        effname,
+                        max(num_families) = 1 as unique
+                    FROM packages INNER JOIN metapackage_repocounts USING(effname)
+                    WHERE NOT shadow_only
+                    GROUP BY effname,category
+                WITH DATA
+        """)
+
+        self.cursor.execute("""
+            CREATE UNIQUE INDEX ON category_metapackages(category, effname)
+        """)
+
+        self.cursor.execute("""
+            CREATE INDEX ON category_metapackages(effname)
+        """)
+
+        # maintainer_metapackages
+        self.cursor.execute("""
+            CREATE MATERIALIZED VIEW maintainer_metapackages
+                AS
+                    SELECT
+                        unnest(maintainers) as maintainer,
+                        effname,
+                        count(1) AS num_packages,
+                        count(*) FILTER (WHERE versionclass = 1) AS num_packages_newest,
+                        count(*) FILTER (WHERE versionclass = 2) AS num_packages_outdated,
+                        count(*) FILTER (WHERE versionclass = 3) AS num_packages_ignored,
+                        count(*) FILTER (WHERE versionclass = 4) AS num_packages_unique,
+                        count(*) FILTER (WHERE versionclass = 5) AS num_packages_devel,
+                        count(*) FILTER (WHERE versionclass = 6) AS num_packages_legacy
+                    FROM packages
+                    GROUP BY maintainer, effname
+                WITH DATA
+        """)
+
+        self.cursor.execute("""
+            CREATE UNIQUE INDEX ON maintainer_metapackages(maintainer, effname)
+        """)
+
+        self.cursor.execute("""
+            CREATE INDEX ON maintainer_metapackages(effname)
+        """)
+
+        # maintainers
+        self.cursor.execute("""
+            CREATE MATERIALIZED VIEW maintainers AS
+                SELECT *
+                FROM
+                (
+                    SELECT
+                        unnest(maintainers) AS maintainer,
+                        count(1) AS num_packages,
+                        count(DISTINCT effname) AS num_metapackages,
+                        count(DISTINCT effname) FILTER(WHERE versionclass = 2) AS num_metapackages_outdated,
+                        count(*) FILTER (WHERE versionclass = 1) AS num_packages_newest,
+                        count(*) FILTER (WHERE versionclass = 2) AS num_packages_outdated,
+                        count(*) FILTER (WHERE versionclass = 3) AS num_packages_ignored,
+                        count(*) FILTER (WHERE versionclass = 4) AS num_packages_unique,
+                        count(*) FILTER (WHERE versionclass = 5) AS num_packages_devel,
+                        count(*) FILTER (WHERE versionclass = 6) AS num_packages_legacy
+                    FROM packages
+                    GROUP BY maintainer
+                ) AS packages_subreq
+                LEFT JOIN
+                (
+                    SELECT
+                        maintainer,
+                        json_object_agg(repo, numrepopkg) AS repository_package_counts,
+                        json_object_agg(repo, numrepometapkg) AS repository_metapackage_counts
+                    FROM
+                    (
+                        SELECT
+                            unnest(maintainers) AS maintainer,
+                            repo,
+                            count(*) AS numrepopkg,
+                            count(DISTINCT effname) AS numrepometapkg
+                        FROM packages
+                        GROUP BY maintainer, repo
+                    ) AS repositories_subreq_inner
+                    GROUP BY maintainer
+                ) AS repositories_subreq
+                USING(maintainer)
+                LEFT JOIN
+                (
+                    SELECT
+                        maintainer,
+                        json_object_agg(category, numcatmetapkg) AS category_metapackage_counts
+                    FROM
+                    (
+                        SELECT
+                            unnest(maintainers) AS maintainer,
+                            category,
+                            count(DISTINCT effname) AS numcatmetapkg
+                        FROM packages
+                        WHERE category IS NOT NULL
+                        GROUP BY maintainer, category
+                    ) AS categories_subreq_innser
+                    GROUP BY maintainer
+                ) AS categories_subreq
+                USING(maintainer)
+            WITH DATA
+        """)
+
+        self.cursor.execute("""
+            CREATE UNIQUE INDEX ON maintainers(maintainer)
+        """)
+
         # links for link checker
         self.cursor.execute("""
             CREATE TABLE links (
-                url varchar(2048) not null primary key,
+                url text not null primary key,
                 first_extracted timestamp with time zone not null,
                 last_extracted timestamp with time zone not null,
                 last_checked timestamp with time zone,
@@ -437,19 +538,18 @@ class Database:
                 status smallint,
                 redirect smallint,
                 size bigint,
-                location varchar(2048)
+                location text
             )
         """)
 
         # problems
         self.cursor.execute("""
             CREATE TABLE problems (
-                repo varchar(255) not null,
-                name varchar(255) not null,
-                effname varchar(255) not null,
-                maintainer varchar(255),
-                severity smallint not null default 1,
-                problem varchar(1024) not null
+                repo text not null,
+                name text not null,
+                effname text not null,
+                maintainer text,
+                problem text not null
             )
         """)
 
@@ -459,19 +559,34 @@ class Database:
 
         # reports
         self.cursor.execute("""
-            CREATE TABLE reports (
+            CREATE TABLE IF NOT EXISTS reports (
+                id integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
                 created timestamp with time zone not null,
-                effname varchar(255) not null,
+                effname text not null,
                 need_verignore boolean not null,
                 need_split boolean not null,
                 need_merge boolean not null,
                 comment text,
                 reply text,
-                expires timestamp with time zone
+                accepted boolean
             )
         """)
 
         self.cursor.execute('CREATE INDEX ON reports(effname)')
+
+        # url_relations
+        self.cursor.execute("""
+            CREATE MATERIALIZED VIEW url_relations AS
+                SELECT DISTINCT
+                    effname,
+                    regexp_replace(regexp_replace(homepage, '/?([#?].*)?$', ''), '^https?://(www\\.)?', '') as url
+                FROM packages
+                WHERE homepage ~ '^https?://'
+            WITH DATA
+        """)
+
+        self.cursor.execute('CREATE UNIQUE INDEX ON url_relations(effname, url)')  # we only need url here because we need unique index for concurrent refresh
+        self.cursor.execute('CREATE INDEX ON url_relations(url)')
 
     def Clear(self):
         self.cursor.execute("""DELETE FROM packages""")
@@ -482,6 +597,9 @@ class Database:
                 num_packages_newest = 0,
                 num_packages_outdated = 0,
                 num_packages_ignored = 0,
+                num_packages_unique = 0,
+                num_packages_devel = 0,
+                num_packages_legacy = 0,
                 num_metapackages = 0,
                 num_metapackages_unique = 0,
                 num_metapackages_newest = 0,
@@ -512,7 +630,6 @@ class Database:
 
                 version,
                 origversion,
-                effversion,
                 versionclass,
 
                 maintainers,
@@ -524,7 +641,13 @@ class Database:
 
                 ignorepackage,
                 shadow,
-                ignoreversion
+                ignoreversion,
+                devel,
+                verfixed,
+
+                flavors,
+
+                extrafields
             ) VALUES (
                 %s,
                 %s,
@@ -536,7 +659,6 @@ class Database:
                 %s,
                 %s,
                 %s,
-                %s,
 
                 %s,
                 %s,
@@ -547,6 +669,12 @@ class Database:
 
                 %s,
                 %s,
+                %s,
+                %s,
+                %s,
+
+                %s,
+
                 %s
             )
             """,
@@ -561,7 +689,6 @@ class Database:
 
                     package.version,
                     package.origversion,
-                    package.effversion,
                     package.versionclass,
 
                     package.maintainers,
@@ -574,6 +701,12 @@ class Database:
                     package.ignore,
                     package.shadow,
                     package.ignoreversion,
+                    package.devel,
+                    package.verfixed,
+
+                    package.flavors,
+
+                    json.dumps(package.extrafields),
                 ) for package in packages
             ]
         )
@@ -597,10 +730,12 @@ class Database:
         )
 
     def UpdateViews(self):
+        self.cursor.execute("""REFRESH MATERIALIZED VIEW CONCURRENTLY metapackage_repocounts""")
         self.cursor.execute("""REFRESH MATERIALIZED VIEW CONCURRENTLY repo_metapackages""")
+        self.cursor.execute("""REFRESH MATERIALIZED VIEW CONCURRENTLY category_metapackages""")
         self.cursor.execute("""REFRESH MATERIALIZED VIEW CONCURRENTLY maintainer_metapackages""")
         self.cursor.execute("""REFRESH MATERIALIZED VIEW CONCURRENTLY maintainers""")
-        self.cursor.execute("""REFRESH MATERIALIZED VIEW CONCURRENTLY metapackage_repocounts""")
+        self.cursor.execute("""REFRESH MATERIALIZED VIEW CONCURRENTLY url_relations""")
 
         # package stats
         self.cursor.execute("""
@@ -610,30 +745,30 @@ class Database:
                     num_packages,
                     num_packages_newest,
                     num_packages_outdated,
-                    num_packages_ignored
+                    num_packages_ignored,
+                    num_packages_unique,
+                    num_packages_devel,
+                    num_packages_legacy
                 ) SELECT
                     repo,
                     sum(num_packages),
                     sum(num_packages_newest),
                     sum(num_packages_outdated),
-                    sum(num_packages_ignored)
-                FROM(
-                    SELECT
-                        repo,
-                        count(*) as num_packages,
-                        count(nullif(versionclass=1, false)) as num_packages_newest,
-                        count(nullif(versionclass=2, false)) as num_packages_outdated,
-                        count(nullif(versionclass=3, false)) as num_packages_ignored
-                    FROM packages
-                    GROUP BY repo, effname
-                ) AS TEMP
+                    sum(num_packages_ignored),
+                    sum(num_packages_unique),
+                    sum(num_packages_devel),
+                    sum(num_packages_legacy)
+                FROM repo_metapackages
                 GROUP BY repo
                 ON CONFLICT (name)
                 DO UPDATE SET
                     num_packages = EXCLUDED.num_packages,
                     num_packages_newest = EXCLUDED.num_packages_newest,
                     num_packages_outdated = EXCLUDED.num_packages_outdated,
-                    num_packages_ignored = EXCLUDED.num_packages_ignored
+                    num_packages_ignored = EXCLUDED.num_packages_ignored,
+                    num_packages_unique = EXCLUDED.num_packages_unique,
+                    num_packages_devel = EXCLUDED.num_packages_devel,
+                    num_packages_legacy = EXCLUDED.num_packages_legacy
         """)
 
         self.cursor.execute("""
@@ -668,38 +803,10 @@ class Database:
                 ) SELECT
                     repo,
                     count(*),
-                    count(nullif(unique_only, false)),
-                    count(nullif(NOT unique_only and num_packages_newest>0, false)),
-                    count(nullif(NOT unique_only and num_packages_newest=0, false))
-                FROM(
-                        SELECT
-                            repo,
-                            TRUE as unique_only,
-                            count(*) as num_packages,
-                            count(nullif(versionclass=1, false)) as num_packages_newest
-                        FROM packages
-                        WHERE effname IN (
-                            SELECT
-                                effname
-                            FROM metapackage_repocounts
-                            WHERE NOT shadow_only AND num_families = 1
-                        )
-                        GROUP BY repo, effname
-                    UNION ALL
-                        SELECT
-                            repo,
-                            FALSE as unique_only,
-                            count(*) as num_packages,
-                            count(nullif(versionclass=1, false)) as num_packages_newest
-                        FROM packages
-                        WHERE effname IN (
-                            SELECT
-                                effname
-                            FROM metapackage_repocounts
-                            WHERE NOT shadow_only AND num_families > 1
-                        )
-                        GROUP BY repo, effname
-                ) AS TEMP
+                    count(*) FILTER (WHERE repo_metapackages.unique),
+                    count(*) FILTER (WHERE NOT repo_metapackages.unique AND (num_packages_newest > 0 OR num_packages_devel > 0) AND num_packages_outdated = 0),
+                    count(*) FILTER (WHERE num_packages_outdated > 0)
+                FROM repo_metapackages
                 GROUP BY repo
                 ON CONFLICT (name)
                 DO UPDATE SET
@@ -717,15 +824,13 @@ class Database:
                     name,
                     effname,
                     maintainer,
-                    severity,
                     problem
                 )
                 SELECT DISTINCT
                     packages.repo,
                     packages.name,
                     packages.effname,
-                    case when packages.maintainers = '{}' then null else unnest(packages.maintainers) end,
-                    3,
+                    unnest(case when packages.maintainers = '{}' then '{null}' else packages.maintainers end),
                     'Homepage link "' ||
                         links.url ||
                         '" is dead (' ||
@@ -750,31 +855,73 @@ class Database:
 
         self.cursor.execute("""
             INSERT
+                INTO problems (
+                    repo,
+                    name,
+                    effname,
+                    maintainer,
+                    problem
+                )
+                SELECT DISTINCT
+                    packages.repo,
+                    packages.name,
+                    packages.effname,
+                    unnest(case when packages.maintainers = '{}' then '{null}' else packages.maintainers end),
+                    'Homepage link "' ||
+                        links.url ||
+                        '" is a permanent redirect to "' ||
+                        links.location ||
+                        '" and should be updated'
+                FROM packages
+                    INNER JOIN links ON (packages.homepage = links.url)
+                WHERE
+                    (
+                        links.redirect = 301 AND
+                        replace(links.url, 'http://', 'https://') = links.location
+                    )
+        """)
+
+        self.cursor.execute("""
+            INSERT
                 INTO problems(repo, name, effname, maintainer, problem)
                 SELECT DISTINCT
                     repo,
                     name,
                     effname,
-                    case when maintainers = '{}' then null else unnest(maintainers) end,
-                    'Homepage link "' || homepage || '" should use https:// schema as GitHub is HTTPS-only.'
+                    unnest(case when packages.maintainers = '{}' then '{null}' else packages.maintainers end),
+                    'Homepage link "' || homepage || '" points to Google Code which was discontinued. The link should be updated (probably along with download URLs). If this link is still alive, it may point to a new project homepage.'
                 FROM packages
-                WHERE homepage LIKE 'http://github.com/%'
+                WHERE
+                    homepage SIMILAR TO 'https?://([^/]+.)?googlecode.com(/%)?' OR
+                    homepage SIMILAR TO 'https?://code.google.com(/%)?'
         """)
 
         self.cursor.execute("""
             INSERT
-                INTO problems(repo, name, effname, maintainer, severity, problem)
+                INTO problems(repo, name, effname, maintainer, problem)
                 SELECT DISTINCT
                     repo,
                     name,
                     effname,
-                    case when maintainers = '{}' then null else unnest(maintainers) end,
-                    3,
-                    'Homepage link "' || homepage || '" points to googlecode.com which was discontinued. The link should be updated (probably along with download URLs). If this link is still alive, it may point to a new project homepage.'
+                    unnest(case when packages.maintainers = '{}' then '{null}' else packages.maintainers end),
+                    'Homepage link "' || homepage || '" points to codeplex which was discontinued. The link should be updated (probably along with download URLs).'
                 FROM packages
                 WHERE
-                    homepage LIKE 'http://%googlecode.com/%' OR
-                    homepage LIKE 'https://%googlecode.com/%'
+                    homepage SIMILAR TO 'https?://([^/]+.)?codeplex.com(/%)?'
+        """)
+
+        self.cursor.execute("""
+            INSERT
+                INTO problems(repo, name, effname, maintainer, problem)
+                SELECT DISTINCT
+                    repo,
+                    name,
+                    effname,
+                    unnest(case when packages.maintainers = '{}' then '{null}' else packages.maintainers end),
+                    'Homepage link "' || homepage || '" points to Gna which was discontinued. The link should be updated (probably along with download URLs).'
+                FROM packages
+                WHERE
+                    homepage SIMILAR TO 'https?://([^/]+.)?gna.org(/%)?'
         """)
 
         self.cursor.execute("""
@@ -802,13 +949,13 @@ class Database:
                 num_maintainers = (SELECT count(*) FROM maintainers)
         """)
 
-        # reports
-        self.cursor.execute('DELETE FROM reports WHERE now() >= expires')
+        # cleanup stale links
+        self.cursor.execute('DELETE FROM links WHERE last_extracted < now() - INTERVAL \'1\' MONTH')
 
     def Commit(self):
         self.db.commit()
 
-    def GetMetapackage(self, name):
+    def GetMetapackage(self, names):
         self.cursor.execute(
             """
             SELECT
@@ -821,7 +968,6 @@ class Database:
 
                 version,
                 origversion,
-                effversion,
                 versionclass,
 
                 maintainers,
@@ -833,11 +979,17 @@ class Database:
 
                 ignorepackage,
                 shadow,
-                ignoreversion
+                ignoreversion,
+                devel,
+                verfixed,
+
+                flavors,
+
+                extrafields
             FROM packages
-            WHERE effname = %s
-            """,
-            (name,)
+            WHERE effname {}
+            """.format('= ANY (%s)' if isinstance(names, list) else '= %s'),
+            (names,)
         )
 
         return [
@@ -851,32 +1003,31 @@ class Database:
 
                 version=row[5],
                 origversion=row[6],
-                effversion=row[7],
-                versionclass=row[8],
+                versionclass=row[7],
 
-                maintainers=row[9],
-                category=row[10],
-                comment=row[11],
-                homepage=row[12],
-                licenses=row[13],
-                downloads=row[14],
+                maintainers=row[8],
+                category=row[9],
+                comment=row[10],
+                homepage=row[11],
+                licenses=row[12],
+                downloads=row[13],
 
-                ignore=row[15],
-                shadow=row[16],
-                ignoreversion=row[17],
+                ignore=row[14],
+                shadow=row[15],
+                ignoreversion=row[16],
+                devel=row[17],
+                verfixed=row[18],
+
+                flavors=row[19],
+
+                extrafields=row[20],
             ) for row in self.cursor.fetchall()
         ]
 
-    def GetMetapackages(self, *filters, limit=500):
-        req = MetapackageRequest()
+    def GetMetapackages(self, request, limit=500):
+        request.Limit(limit)
 
-        for f in filters:
-            if f:
-                f.ApplyToRequest(req)
-
-        req.Limit(limit)
-
-        query, args = req.GetQuery()
+        query, args = request.GetQuery()
 
         self.cursor.execute(
             """
@@ -890,7 +1041,6 @@ class Database:
 
                 version,
                 origversion,
-                effversion,
                 versionclass,
 
                 maintainers,
@@ -902,8 +1052,15 @@ class Database:
 
                 ignorepackage,
                 shadow,
-                ignoreversion
-            FROM packages WHERE effname IN (
+                ignoreversion,
+                devel,
+                verfixed,
+
+                flavors,
+
+                extrafields
+            FROM packages
+            WHERE effname IN (
                 {}
             )
             """.format(query),
@@ -921,19 +1078,113 @@ class Database:
 
                 version=row[5],
                 origversion=row[6],
-                effversion=row[7],
-                versionclass=row[8],
+                versionclass=row[7],
 
-                maintainers=row[9],
-                category=row[10],
-                comment=row[11],
-                homepage=row[12],
-                licenses=row[13],
-                downloads=row[14],
+                maintainers=row[8],
+                category=row[9],
+                comment=row[10],
+                homepage=row[11],
+                licenses=row[12],
+                downloads=row[13],
 
-                ignore=row[15],
-                shadow=row[16],
-                ignoreversion=row[17],
+                ignore=row[14],
+                shadow=row[15],
+                ignoreversion=row[16],
+                devel=row[17],
+                verfixed=row[18],
+
+                flavors=row[19],
+
+                extrafields=row[20],
+            ) for row in self.cursor.fetchall()
+        ]
+
+    def GetRelatedMetapackages(self, name, limit=500):
+        self.cursor.execute(
+            """
+            SELECT
+                repo,
+                family,
+                subrepo,
+
+                name,
+                effname,
+
+                version,
+                origversion,
+                versionclass,
+
+                maintainers,
+                category,
+                comment,
+                homepage,
+                licenses,
+                downloads,
+
+                ignorepackage,
+                shadow,
+                ignoreversion,
+                devel,
+                verfixed,
+
+                flavors,
+
+                extrafields
+            FROM packages
+            WHERE effname IN (
+                WITH RECURSIVE r AS (
+                        SELECT
+                            effname,
+                            url
+                        FROM url_relations
+                        WHERE effname=%s
+                    UNION
+                        SELECT
+                            url_relations.effname,
+                            url_relations.url
+                        FROM url_relations
+                        JOIN r ON
+                            url_relations.effname = r.effname OR url_relations.url = r.url
+                )
+                SELECT DISTINCT
+                    effname
+                FROM r
+                ORDER BY effname
+                LIMIT %s
+            )
+            """,
+            (name, limit)
+        )
+
+        return [
+            Package(
+                repo=row[0],
+                family=row[1],
+                subrepo=row[2],
+
+                name=row[3],
+                effname=row[4],
+
+                version=row[5],
+                origversion=row[6],
+                versionclass=row[7],
+
+                maintainers=row[8],
+                category=row[9],
+                comment=row[10],
+                homepage=row[11],
+                licenses=row[12],
+                downloads=row[13],
+
+                ignore=row[14],
+                shadow=row[15],
+                ignoreversion=row[16],
+                devel=row[17],
+                verfixed=row[18],
+
+                flavors=row[19],
+
+                extrafields=row[20],
             ) for row in self.cursor.fetchall()
         ]
 
@@ -968,7 +1219,8 @@ class Database:
             SELECT
                 maintainer,
                 num_packages,
-                num_packages_outdated
+                num_metapackages,
+                num_metapackages_outdated
             FROM maintainers
         """
         args = []
@@ -1002,7 +1254,8 @@ class Database:
             {
                 'maintainer': row[0],
                 'num_packages': row[1],
-                'num_packages_outdated': row[2]
+                'num_metapackages': row[2],
+                'num_metapackages_outdated': row[3]
             } for row in self.cursor.fetchall()
         ], key=lambda m: m['maintainer'])
 
@@ -1014,7 +1267,14 @@ class Database:
                 num_packages_newest,
                 num_packages_outdated,
                 num_packages_ignored,
-                num_metapackages
+                num_packages_unique,
+                num_packages_devel,
+                num_packages_legacy,
+                num_metapackages,
+                num_metapackages_outdated,
+                repository_package_counts,
+                repository_metapackage_counts,
+                category_metapackage_counts
             FROM maintainers
             WHERE maintainer = %s
             """,
@@ -1031,7 +1291,14 @@ class Database:
             'num_packages_newest': rows[0][1],
             'num_packages_outdated': rows[0][2],
             'num_packages_ignored': rows[0][3],
-            'num_metapackages': rows[0][4],
+            'num_packages_unique': rows[0][4],
+            'num_packages_devel': rows[0][5],
+            'num_packages_legacy': rows[0][6],
+            'num_metapackages': rows[0][7],
+            'num_metapackages_outdated': rows[0][8],
+            'repository_package_counts': rows[0][9],
+            'repository_metapackage_counts': rows[0][10],
+            'category_metapackage_counts': rows[0][11],
         }
 
     def GetMaintainerMetapackages(self, maintainer, limit=1000):
@@ -1061,38 +1328,40 @@ class Database:
         #
         # score = |M⋂C| / |M⋃C| = |M⋂C| / (|M| + |C| - |M⋂C|)
         #
-        # - count(*) is number of common metapackages for both maintainers, e.g. |M⋂C|
-        # - min(num_metapackages) is number of metapackages for candidate maintainer |C|
-        #   we use min because we use GROUP BY and just need a group operation; since we
-        #   group by maintainer and join by maintainer, num_metapackages is the same
-        #   in all records, and we may pick min, max, avg, whatever
+        # - num_metapackages_common is |M⋂C|
+        # - num_metapackages is |C|
         # - sub-select just gets |M|
-        # - the divisor is |M⋃C| = |M| + |C| - |M⋂C|
+        # - the divisor thus is |M⋃C| = |M| + |C| - |M⋂C|
         self.cursor.execute(
             """
             SELECT
                 maintainer,
-                count(*) AS count,
-                100.0 * count(*) / (
-                    min(num_metapackages) -
-                    count(*) +
-                    (
+                num_metapackages_common,
+                100.0 * num_metapackages_common / (
+                    num_metapackages - num_metapackages_common + (
                         SELECT num_metapackages
                         FROM maintainers
                         WHERE maintainer=%s
                     )
                 ) AS score
-            FROM maintainer_metapackages
-            INNER JOIN maintainers USING(maintainer)
-            WHERE
-                maintainer != %s AND
-                effname IN (
+            FROM
+                (
                     SELECT
-                        effname
-                    FROM maintainer_metapackages
-                    WHERE maintainer=%s
-                )
-            GROUP BY maintainer
+                        maintainer,
+                        count(*) AS num_metapackages_common
+                    FROM
+                        maintainer_metapackages
+                    WHERE
+                        maintainer != %s AND
+                        effname IN (
+                            SELECT
+                                effname
+                            FROM maintainer_metapackages
+                            WHERE maintainer=%s
+                        )
+                    GROUP BY maintainer
+                ) AS intersecting_counts
+                INNER JOIN maintainers USING(maintainer)
             ORDER BY score DESC
             LIMIT %s
             """,
@@ -1115,6 +1384,9 @@ class Database:
                 num_packages_newest,
                 num_packages_outdated,
                 num_packages_ignored,
+                num_packages_unique,
+                num_packages_devel,
+                num_packages_legacy,
                 num_metapackages,
                 num_metapackages_unique,
                 num_metapackages_newest,
@@ -1133,14 +1405,17 @@ class Database:
                 'num_packages_newest': row[2],
                 'num_packages_outdated': row[3],
                 'num_packages_ignored': row[4],
-                'num_metapackages': row[5],
-                'num_metapackages_unique': row[6],
-                'num_metapackages_newest': row[7],
-                'num_metapackages_outdated': row[8],
-                'last_update_utc': row[9],
-                'since_last_update': row[10],
-                'num_problems': row[11],
-                'num_maintainers': row[12],
+                'num_packages_unique': row[5],
+                'num_packages_devel': row[6],
+                'num_packages_legacy': row[7],
+                'num_metapackages': row[8],
+                'num_metapackages_unique': row[9],
+                'num_metapackages_newest': row[10],
+                'num_metapackages_outdated': row[11],
+                'last_update_utc': row[12],
+                'since_last_update': row[13],
+                'num_problems': row[14],
+                'num_maintainers': row[15],
             } for row in self.cursor.fetchall()
         ]
 
@@ -1153,6 +1428,9 @@ class Database:
                 num_packages_newest,
                 num_packages_outdated,
                 num_packages_ignored,
+                num_packages_unique,
+                num_packages_devel,
+                num_packages_legacy,
                 num_metapackages,
                 num_metapackages_unique,
                 num_metapackages_newest,
@@ -1176,14 +1454,17 @@ class Database:
                 'num_packages_newest': row[1],
                 'num_packages_outdated': row[2],
                 'num_packages_ignored': row[3],
-                'num_metapackages': row[4],
-                'num_metapackages_unique': row[5],
-                'num_metapackages_newest': row[6],
-                'num_metapackages_outdated': row[7],
-                'last_update_utc': row[8],
-                'since_last_update': row[9],
-                'num_problems': row[10],
-                'num_maintainers': row[11],
+                'num_packages_unique': row[4],
+                'num_packages_devel': row[5],
+                'num_packages_legacy': row[6],
+                'num_metapackages': row[7],
+                'num_metapackages_unique': row[8],
+                'num_metapackages_newest': row[9],
+                'num_metapackages_outdated': row[10],
+                'last_update_utc': row[11],
+                'since_last_update': row[12],
+                'num_problems': row[13],
+                'num_maintainers': row[14],
             }
         else:
             return {
@@ -1191,6 +1472,9 @@ class Database:
                 'num_packages_newest': 0,
                 'num_packages_outdated': 0,
                 'num_packages_ignored': 0,
+                'num_packages_unique': 0,
+                'num_packages_devel': 0,
+                'num_packages_legacy': 0,
                 'num_metapackages': 0,
                 'num_metapackages_unique': 0,
                 'num_metapackages_newest': 0,
@@ -1206,7 +1490,7 @@ class Database:
             SELECT
                 ts,
                 now() - ts,
-                jsonb_array_elements(snapshot)
+                snapshot
             FROM repositories_history
             WHERE ts IN (
                 SELECT
@@ -1215,29 +1499,36 @@ class Database:
                 WHERE ts < now() - INTERVAL %s
                 ORDER BY ts DESC
                 LIMIT 1
-            );
+            )
         """, (datetime.timedelta(seconds=seconds),)
         )
 
-        return [
-            {
-                'timestamp': row[0],
-                'timedelta': row[1],
-                **row[2]
-            }
-            for row in self.cursor.fetchall()
-        ]
+        row = self.cursor.fetchall()[0]
 
-    def GetRepositoriesHistoryPeriod(self, seconds=60 * 60 * 24):
+        return {
+            'timestamp': row[0],
+            'timedelta': row[1],
+            **row[2]
+        }
+
+    def GetRepositoriesHistoryPeriod(self, seconds=60 * 60 * 24, repo=None):
+        repopath = ''
+        repoargs = ()
+
+        if repo:
+            repopath = '#>%s'
+            repoargs = ('{' + repo + '}', )
+
         self.cursor.execute("""
             SELECT
                 ts,
                 now() - ts,
-                snapshot
+                snapshot{}
             FROM repositories_history
             WHERE ts >= now() - INTERVAL %s
             ORDER BY ts
-        """, (datetime.timedelta(seconds=seconds),)
+            """.format(repopath),
+            repoargs + (datetime.timedelta(seconds=seconds),)
         )
 
         return [
@@ -1336,7 +1627,7 @@ class Database:
                 now(),
                 now()
             FROM packages
-            WHERE homepage IS NOT NULL AND homepage LIKE 'http%%' AND repo NOT IN('cpan', 'pypi', 'rubygems', 'hackage')
+            WHERE homepage IS NOT NULL AND repo NOT IN('cpan', 'pypi', 'rubygems', 'hackage', 'cran')
             ON CONFLICT (url)
             DO UPDATE SET
                 last_extracted = now()
@@ -1374,7 +1665,7 @@ class Database:
             conditions.append('status != 200')
 
         if succeeded_only:
-            conditions.append('status == 200')
+            conditions.append('status = 200')
 
         conditions_expr = ''
         limit_expr = ''
@@ -1448,15 +1739,21 @@ class Database:
                 location
             FROM links
             WHERE url in (
-                SELECT
-                    unnest(downloads) as url
-                FROM packages
-                WHERE effname = %s
-                UNION
-                SELECT
-                    homepage
-                FROM packages
-                WHERE homepage IS NOT NULL and effname = %s
+                -- this additional wrap seem to fix query planner somehow
+                -- to use index scan on links instead of seq scan, which
+                -- makes the query 100x faster; XXX: recheck with postgres 10
+                -- or report this?
+                SELECT DISTINCT url from (
+                    SELECT
+                        unnest(downloads) as url
+                    FROM packages
+                    WHERE effname = %s
+                    UNION
+                    SELECT
+                        homepage as url
+                    FROM packages
+                    WHERE homepage IS NOT NULL and effname = %s
+                ) AS tmp
             )
             """,
             (name, name)
@@ -1536,7 +1833,6 @@ class Database:
                 name,
                 effname,
                 maintainer,
-                severity,
                 problem
             FROM problems
             {}
@@ -1552,8 +1848,7 @@ class Database:
                 'name': row[1],
                 'effname': row[2],
                 'maintainer': row[3],
-                'severity': row[4],
-                'problem': row[5],
+                'problem': row[4],
             }
             for row in self.cursor.fetchall()
         ]
@@ -1595,6 +1890,7 @@ class Database:
         self.cursor.execute(
             """
             SELECT
+                id,
                 now() - created,
                 effname,
                 need_verignore,
@@ -1602,7 +1898,7 @@ class Database:
                 need_merge,
                 comment,
                 reply,
-                CASE WHEN expires IS NULL then NULL WHEN expires > now() THEN expires - now() ELSE interval '0' END
+                accepted
             FROM reports
             WHERE effname = %s
             ORDER BY created desc
@@ -1612,14 +1908,15 @@ class Database:
 
         return [
             {
-                'created_ago': row[0],
-                'effname': row[1],
-                'need_verignore': row[2],
-                'need_split': row[3],
-                'need_merge': row[4],
-                'comment': row[5],
-                'reply': row[6],
-                'expires': row[7],
+                'id': row[0],
+                'created_ago': row[1],
+                'effname': row[2],
+                'need_verignore': row[3],
+                'need_split': row[4],
+                'need_merge': row[5],
+                'comment': row[6],
+                'reply': row[7],
+                'accepted': row[8],
             }
             for row in self.cursor.fetchall()
         ]

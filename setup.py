@@ -1,6 +1,20 @@
 #!/usr/bin/env python3
 
+import subprocess
 from distutils.core import Extension, setup
+
+
+def pkgconfig(package):
+    result = {}
+    for token in subprocess.check_output(['pkg-config', '--libs', '--cflags', package]).decode('utf-8').split():
+        if token.startswith('-I'):
+            result.setdefault('include_dirs', []).append(token[2:])
+        elif token.startswith('-L'):
+            result.setdefault('library_dirs', []).append(token[2:])
+        elif token.startswith('-l'):
+            result.setdefault('libraries', []).append(token[2:])
+    return result
+
 
 setup(
     name='repology',
@@ -11,12 +25,11 @@ setup(
     url='http://repology.org/',
     packages=[
         'repology',
-        'repology.fetcher',
-        'repology.parser',
+        'repology.fetchers',
+        'repology.parsers',
     ],
     scripts=[
         'repology-app.py',
-        'repology-benchmark.py',
         'repology-dump.py',
         'repology-gensitemap.py',
         'repology-linkchecker.py',
@@ -25,20 +38,19 @@ setup(
     classifiers=[
         'Topic :: System :: Archiving :: Packaging',
         'Topic :: System :: Software Distribution',
-        'Development Status :: 4 - Beta',
+        'Development Status :: 5 - Production/Stable',
         'Environment :: Console',
         'Environment :: Web Environment',
         'License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)',
-        'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.4',
-        'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: 3 :: Only',
+        'Programming Language :: Python :: 3.6',
         'Programming Language :: C',
     ],
     ext_modules=[
         Extension(
             'repology.version',
             sources=['repology/version.c'],
-            extra_compile_args=['-std=c99'],
+            **pkgconfig('libversion')
         )
     ]
 )

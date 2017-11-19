@@ -1,4 +1,4 @@
-# Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
+# Copyright (C) 2016-2017 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
 #
@@ -16,7 +16,6 @@
 # along with repology.  If not, see <http://www.gnu.org/licenses/>.
 
 import sys
-
 from functools import cmp_to_key
 
 from repology.package import *
@@ -39,9 +38,7 @@ def PackagesMerge(packages):
             nextpackages = []
             merged = packages[0]
             for package in packages[1:]:
-                if merged.IsMergeable(package):
-                    merged.Merge(package)
-                else:
+                if not merged.TryMerge(package):
                     nextpackages.append(package)
 
             outpkgs.append(merged)
@@ -59,95 +56,171 @@ def PackagesetCheckFilters(packages, *filters):
 
 
 def FillPackagesetVersions(packages):
-    versions = set()
-    families = set()
-
-    for package in packages:
-        if not package.ignoreversion:
-            versions.add(package.version)
-        families.add(package.family)
-
-    bestversion = None
-    for version in versions:
-        if bestversion is None or VersionCompare(version, bestversion) > 0:
-            bestversion = version
-
-    for package in packages:
-        result = VersionCompare(package.version, bestversion) if bestversion is not None else 1
-        if result > 0:
-            package.versionclass = PackageVersionClass.ignored
-        elif result == 0:
-            # XXX: if len(families) == 1 -> PackageVersionClass.unique
-            package.versionclass = PackageVersionClass.newest
-        else:
-            package.versionclass = PackageVersionClass.outdated
-
-
-def PackagesetToSummaries(packages):
-    summary = {}
-
-    state_by_repo = {}
-    families = set()
-
-    for package in packages:
-        families.add(package.family)
-
-        if package.repo not in state_by_repo:
-            state_by_repo[package.repo] = {
-                'has_outdated': False,
-                'bestpackage': None,
-                'count': 0
-            }
-
-        if package.versionclass == PackageVersionClass.outdated:
-            state_by_repo[package.repo]['has_outdated'] = True,
-
-        if state_by_repo[package.repo]['bestpackage'] is None or VersionCompare(package.version, state_by_repo[package.repo]['bestpackage'].version) > 0:
-            state_by_repo[package.repo]['bestpackage'] = package
-
-        state_by_repo[package.repo]['count'] += 1
-
-    for repo, state in state_by_repo.items():
-        resulting_class = None
-
-        # XXX: lonely ignored package is currently lonely; should it be ignored instead?
-        if state['bestpackage'].versionclass == PackageVersionClass.outdated:
-            resulting_class = RepositoryVersionClass.outdated
-        elif len(families) == 1:
-            resulting_class = RepositoryVersionClass.lonely
-        elif state['bestpackage'].versionclass == PackageVersionClass.newest:
-            if state['has_outdated']:
-                resulting_class = RepositoryVersionClass.mixed
+    # helpers
+    def AggregateBySameVersion(packages):
+        current = None
+        for package in packages:
+            if current is None:
+                current = [package]
+            elif VersionCompare(current[0].version, package.version) == 0:
+                current.append(package)
             else:
-                resulting_class = RepositoryVersionClass.newest
-        elif state['bestpackage'].versionclass == PackageVersionClass.ignored:
-            resulting_class = RepositoryVersionClass.ignored
+                yield current
+                current = [package]
 
-        summary[repo] = {
-            'version': state['bestpackage'].version,
-            'bestpackage': state['bestpackage'],
-            'versionclass': resulting_class,
-            'numpackages': state['count']
-        }
+        if current is not None:
+            yield current
 
-    return summary
+    class BranchPrototype:
+        __slots__ = ['versionclass', 'check']
+
+        def __init__(self, versionclass, check):
+            self.versionclass = versionclass
+            self.check = check
+
+        def Check(self, package):
+            return self.check(package)
+
+        def CreateBranch(self, bestversion=None):
+            return Branch(self.versionclass, bestversion)
+
+    class Branch:
+        __slots__ = ['versionclass', 'bestversion', 'lastversion']
+
+        def __init__(self, versionclass, bestversion=None):
+            self.versionclass = versionclass
+            self.bestversion = bestversion
+            self.lastversion = bestversion
+
+        def SetLastVersion(self, lastversion):
+            self.lastversion = lastversion
+
+        def BestVersionCompare(self, version):
+            return VersionCompare(version, self.bestversion) if self.bestversion is not None else 1
+
+        def IsAfterBranch(self, version):
+            return VersionCompare(version, self.lastversion) == -1 if self.lastversion is not None else False
+
+    # we always work on packages sorted by version
+    packages = PackagesetSortByVersions(packages)
+
+    # branch prototypes
+    default_branchproto = BranchPrototype(VersionClass.newest, lambda package: not package.devel)
+
+    branchprotos = [
+        BranchPrototype(VersionClass.devel, lambda package: package.devel),
+        default_branchproto,
+    ]
+
+    default_branchproto_idx = branchprotos.index(default_branchproto)
+
+    #
+    # Pass 1: discover branches
+    #
+    branches = []
+    families = set()
+    packages_by_repo = {}
+    current_branchproto_idx = None
+    for verpackages in AggregateBySameVersion(packages):
+        has_non_ignored = False
+        matching_branchproto_indexes = set()
+
+        for package in verpackages:
+            families.add(package.family)
+            packages_by_repo.setdefault(package.repo, []).append(package)
+
+            if not package.ignoreversion:
+                has_non_ignored = True
+
+            for branchproto_idx in range(0, len(branchprotos)):
+                if branchprotos[branchproto_idx].Check(package):
+                    matching_branchproto_indexes.add(branchproto_idx)
+
+        final_branchproto_idx = list(matching_branchproto_indexes)[0] if len(matching_branchproto_indexes) == 1 else default_branchproto_idx
+
+        if final_branchproto_idx == current_branchproto_idx:
+            branches[-1].SetLastVersion(verpackages[0].version)
+        elif (current_branchproto_idx is None or final_branchproto_idx > current_branchproto_idx) and has_non_ignored:
+            branches.append(branchprotos[final_branchproto_idx].CreateBranch(verpackages[0].version))
+            current_branchproto_idx = final_branchproto_idx
+
+    # handle unique package
+    metapackage_is_unique = len(families) == 1
+
+    # we should always have at least one branch
+    if not branches:
+        branches = [default_branchproto.CreateBranch()]
+
+    #
+    # Pass 2: fill version classes
+    #
+    for repo, repo_packages in packages_by_repo.items():
+        current_branch_idx = 0
+        first_version_in_branch_per_flavor = {}
+
+        for package in repo_packages:  # these are still sorted by version
+            # switch to next branch when the current one is over, but not past the last branch
+            while current_branch_idx < len(branches) - 1 and branches[current_branch_idx].IsAfterBranch(package.version):
+                current_branch_idx += 1
+                first_version_in_branch_per_flavor = {}
+
+            # chose version class based on comparison to branch best version
+            current_comparison = branches[current_branch_idx].BestVersionCompare(package.version)
+
+            if current_comparison > 0:
+                package.versionclass = VersionClass.ignored
+            else:
+                flavor = '_'.join(package.flavors)
+
+                if current_comparison == 0:
+                    package.versionclass = VersionClass.unique if metapackage_is_unique else branches[current_branch_idx].versionclass
+                else:
+                    non_first_in_branch = flavor in first_version_in_branch_per_flavor and VersionCompare(first_version_in_branch_per_flavor[flavor], package.version) != 0
+                    package.versionclass = VersionClass.legacy if non_first_in_branch else VersionClass.outdated
+
+                if flavor not in first_version_in_branch_per_flavor:
+                    first_version_in_branch_per_flavor[flavor] = package.version
+
+
+def PackagesetToBestByRepo(packages):
+    state_by_repo = {}
+
+    for package in PackagesetSortByVersions(packages):
+        if package.repo not in state_by_repo or (state_by_repo[package.repo].versionclass == VersionClass.ignored and package.versionclass != VersionClass.ignored):
+            state_by_repo[package.repo] = package
+
+    return state_by_repo
 
 
 def PackagesetSortByVersions(packages):
-    def packages_version_cmp_reverse(p1, p2):
+    def compare(p1, p2):
         return VersionCompare(p2.version, p1.version)
 
-    return sorted(packages, key=cmp_to_key(packages_version_cmp_reverse))
+    return sorted(packages, key=cmp_to_key(compare))
+
+
+def PackagesetSortByNameVersion(packages):
+    def compare(p1, p2):
+        if p1.name < p2.name:
+            return -1
+        if p1.name > p2.name:
+            return 1
+        return VersionCompare(p2.version, p1.version)
+
+    return sorted(packages, key=cmp_to_key(compare))
 
 
 def PackagesetToFamilies(packages):
     return set([package.family for package in packages])
 
 
-def PackagesetAggregateByVersions(packages):
+def PackagesetAggregateByVersions(packages, classmap={}):
+    def MapClass(versionclass):
+        return classmap.get(versionclass, versionclass)
+
     versions = {}
     for package in packages:
-        key = (package.version, package.versionclass)
+        key = (package.version, MapClass(package.versionclass))
         if key not in versions:
             versions[key] = []
         versions[key].append(package)

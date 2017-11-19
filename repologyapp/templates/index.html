@@ -1,0 +1,230 @@
+{% extends "layout.html" %}
+{#% import "macros.html" as macros %#}
+
+{% block title %}Repology{% endblock %}
+{% block pageheader %}{% endblock %}
+
+{% block content %}
+<div class="container">
+	<header class="jumbotron">
+		<h1>Repology, the packaging hub</h1>
+		<p>Repology analyzes a lot of package repositories and other sources<a href="#repos-footnote">*</a>
+		comparing packages versions across them and gathering other information. Repology shows you in which
+		repositories a given project is packaged, which version is the latest and which needs updating, who
+		maintains the package, and other related information. Repology might be useful</p>
+
+		<div class="row">
+			<div class="col-md-4">
+				<div class="panel panel-primary">
+					<div class="panel-heading text-center">
+						<h3 class="panel-title">For package maintainers</h3>
+					</div>
+					<div class="panel-body">
+						<ul class="list-jumbotron-items">
+							<li>Discover new releases of software you maintain packages for</li>
+							<li>Find new projects to package</li>
+							<li>Get in touch with fellow maintainers to improve packages together</li>
+							<li>Keep package naming and versioning schemes in sync to other repos</li>
+							<li>Fix problems detected by repology, such as broken links</li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="col-md-4">
+				<div class="panel panel-primary">
+					<div class="panel-heading text-center">
+						<h3 class="panel-title">For software authors</h3>
+					</div>
+					<div class="panel-body">
+						<ul class="list-jumbotron-items">
+							<li>Keep track of where and how well your project is packaged</li>
+							<li>Keep in touch with your product package maintainers</li>
+							<li>Use packaging badges like this one:
+								<img class="jumbotron-badge" src="{{ url_for("static", filename="demobadge.v1.svg") }}" alt="Repology badge example">
+							</li>
+						</ul>
+					</div>
+				</div>
+			</div>
+			<div class="col-md-4">
+				<div class="panel panel-primary">
+					<div class="panel-heading text-center">
+						<h3 class="panel-title">For users</h3>
+					</div>
+					<div class="panel-body">
+						<ul class="list-jumbotron-items">
+							<li>Discover new releases of software you use</li>
+							<li>Pick distribution most suitable for you, in terms of package quantity, freshness or stability</li>
+							<li>Keep in touch with maintainers of software you use</li>
+						</ul>
+					</div>
+				</div>
+			</div>
+		</div>
+	</header>
+
+	<section>
+		<h2>News highlights</h2>
+
+		<div class="row">
+			<div class="col-md-4">
+				<time class="news-summary-time" datetime="2017-11-16">2017-11-16</time>
+				added <a href="{{ url_for('repository', repo='devuan_unstable') }}">Devuan</a> repositories
+			</div>
+			<div class="col-md-4">
+				<time class="news-summary-time" datetime="2017-11-12">2017-11-12</time>
+				added <a href="{{ url_for('repository', repo='aosc') }}">AOSC</a> repository
+			</div>
+			<div class="col-md-4">
+				<time class="news-summary-time" datetime="2017-10-25">2017-10-25</time>
+				advanced metapackage filtering (<a href="{{ url_for('news', _anchor='2017-10-25') }}">more...</a>)
+			</div>
+		</div>
+	</section>
+
+	<section>
+		<h2>Quick navigation</h2>
+
+		<div class="row">
+			<div class="col-md-4">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						Search <b>packages</b>
+					</div>
+					<div class="panel-body">
+						<form action="{{ url_for("metapackages") }}" method="GET">
+							<div class="input-group">
+								<input type="text" class="form-control" name="search" placeholder="e.g. &quot;firefox&quot;">
+								<div class="input-group-btn">
+									<button type="submit" class="btn btn-default">Go</button>
+								</div>
+							</div>
+						</form>
+					</div>
+					<div class="panel-footer">
+						or <a href="{{ url_for("metapackages") }}">browse</a> list of all packages
+					</div>
+				</div>
+			</div>
+			<div class="col-md-4">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						Search <b>maintainers</b>
+					</div>
+					<div class="panel-body">
+						<form action="{{ url_for("maintainers") }}" method="GET">
+							<div class="input-group">
+								<input type="text" class="form-control" name="search" placeholder="e.g. &quot;foo@bar.com&quot;">
+								<div class="input-group-btn">
+									<button type="submit" class="btn btn-default">Go</button>
+								</div>
+							</div>
+						</form>
+					</div>
+					<div class="panel-footer">
+						or <a href="{{ url_for("maintainers") }}">browse</a> list of all maintainers
+					</div>
+				</div>
+			</div>
+			<div class="col-md-4">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						...or
+					</div>
+					<div class="panel-body">
+						See some <a href="{{ url_for("maintainers") }}">statistics</a> and a list of all
+						supported <a href="{{ url_for("repositories") }}">repositories</a>, and navigate
+						to per-repository package lists from there.
+					</div>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section>
+		<h2>Top repositories</h2>
+
+		<div class="row">
+			<div class="col-md-3">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						By <b>total</b> number of packages
+					</div>
+					<div class="panel-body">
+						<ol>
+						{% for repostat in top_repos.by_total %}
+							<li><a href="{{ url_for('repository', repo=repostat.name) }}">{{ repometadata[repostat.name].desc }}</a> ({{ repostat.value }})</li>
+						{% endfor %}
+						</ol>
+					</div>
+				</div>
+			</div>
+			<div class="col-md-3">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						By number of <b>non-unique</b> packages
+					</div>
+					<div class="panel-body">
+						<ol>
+						{% for repostat in top_repos.by_nonunique %}
+							<li><a href="{{ url_for('repository', repo=repostat.name) }}">{{ repometadata[repostat.name].desc }}</a> ({{ repostat.value }})</li>
+						{% endfor %}
+						</ol>
+					</div>
+				</div>
+			</div>
+			<div class="col-md-3">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						By number of <b>fresh</b> packages
+					</div>
+					<div class="panel-body">
+						<ol>
+						{% for repostat in top_repos.by_newest %}
+							<li><a href="{{ url_for('repository', repo=repostat.name) }}">{{ repometadata[repostat.name].desc }}</a> ({{ repostat.value }})</li>
+						{% endfor %}
+						</ol>
+					</div>
+				</div>
+			</div>
+			<div class="col-md-3">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						By <b>percentage</b> of fresh packages
+					</div>
+					<div class="panel-body">
+						<ol>
+						{% for repostat in top_repos.by_pnewest %}
+							<li><a href="{{ url_for('repository', repo=repostat.name) }}">{{ repometadata[repostat.name].desc }}</a> ({{ repostat.value }})</li>
+						{% endfor %}
+						</ol>
+					</div>
+					<div class="panel-footer">
+						<sup>*</sup>only repos with > 1000 packages
+					</div>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section>
+		<h2>Popular packages</h2>
+
+		{% include "versionclass_legend.html" %}
+
+		{% include "metapackages_table.html" %}
+
+	</section>
+
+	<section>
+		<h2>Footnotes</h2>
+
+		<p id="repos-footnote">
+			* "a lot of package repositories and other sources" include:
+		</p>
+
+		{% include "supported_repos.html" %}
+	<section>
+
+</div> {# container #}
+{% endblock %}

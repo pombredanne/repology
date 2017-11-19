@@ -1,4 +1,4 @@
-# Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
+# Copyright (C) 2016-2017 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
 #
@@ -15,7 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with repology.  If not, see <http://www.gnu.org/licenses/>.
 
-from repology.package import PackageVersionClass
+from repology.package import VersionClass
 
 
 class MaintainerFilter:
@@ -113,7 +113,7 @@ class OutdatedInRepoFilter:
 
     def Check(self, packages):
         for package in packages:
-            if package.repo == self.repo and package.versionclass == PackageVersionClass.outdated:
+            if package.repo == self.repo and package.versionclass == VersionClass.outdated:
                 return True
 
         return False

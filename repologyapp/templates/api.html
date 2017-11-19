@@ -1,0 +1,152 @@
+{% extends "layout.html" %}
+
+{% block title %}
+{{ super() }}: API
+{% endblock %}
+
+{% block header %}
+API
+{% endblock %}
+
+{% block content %}
+<div class="container">
+
+<article>
+
+<h3>Introduction</h3>
+
+<p>API always returns a list of <em>packages</em>. <em>Package</em> is a dictionary of the following format:</p>
+
+<pre>
+{
+	"repo": "freebsd",
+	"name": "firefox",
+	"version": "50.1.0",
+	"origversion": "50.1.0_4,1",
+	"summary": "Widely used web browser",
+	"categories": ["www"],
+	"licenses": ["GPLv2+"],
+	"maintainers": ["gecko@FreeBSD.org"],
+	"www": ["http://www.mozilla.com/firefox"],
+	"downloads": ["http://download.cdn.mozilla.net/pub/firefox/releases/50.1.0/source/firefox-50.1.0.source.tar.xz"]
+}
+</pre>
+
+<p>Fields are:</p>
+<dl class="dl-horizontal">
+	<dt>repo</dt><dd>name of repository for this package</dd>
+	<dt>subrepo</dt><dd>name of subrepository (if applicable; for example, <em>main</em> or <em>contrib</em> or <em>non-free</em> for Debian)</dd>
+	<dt>name</dt><dd>package name as in repository</dd>
+	<dt>version</dt><dd>package version (sanitized) </dd>
+	<dt>origversion</dt><dd>package version as in repository (if different from <b>version</b>)</dd>
+	<dt>summary</dt><dd>one-line description of the package</dd>
+	<dt>categories</dt><dd>list of package categories</dd>
+	<dt>licenses</dt><dd>list of package licenses</dd>
+	<dt>maintainers</dt><dd>list of package maintainers</dd>
+	<dt>www</dt><dd>list of package webpages</dd>
+	<dt>downloads</dt><dd>list of package downloads</dd>
+</dl>
+
+<p>
+Mandatory fields are <b>repo</b>, <b>name</b> and <b>version</b>, all other fields are optional.
+</p>
+
+<p><em>Metapackage</em> is a group of related <em>packages</em> from different repositories (though it may contain multiple <em>packages</em> from the same repository). <em>Metapackage</em> has its own name which is derived from <em>package</em> names. In most cases it's the same, but sometimes different <em>package</em> names are transformed into a single <em>metapackage</em> name to coalesce differently named <em>packages</em> from different repositories.</p>
+
+<p>API allows to request <em>packages</em> for a single <em>metapackage</em> or for a range of <em>metapackages</em>.</p>
+
+<h3>Single metapackage</h3>
+
+<p>Get list of <em>packages</em> for specific <em>metapackage</em> (here, firefox):</p>
+<pre>
+{{ url_for('api_v1_metapackage', name='firefox') }}
+</pre>
+
+<h3>Multiple metapackages</h3>
+
+<p>The following requests return data for multiple <em>metapackages</em>
+in form of <em>metapackage</em> name → list of <em>packages</em>
+dictionary. API returns no more than {{ per_page }} <em>metapackages</em>
+per request. You may specify a start or an end of <em>metapackage</em> names
+range to request.</p>
+
+<p>Get first {{ per_page }} metapackages:</p>
+<pre>
+{{ url_for('api_v1_metapackages') }}
+</pre>
+
+<p>Get first {{ per_page }} metapackages starting with <b>firefox</b> (inclusive):</p>
+<pre>
+{{ url_for('api_v1_metapackages', bound='firefox') }}
+</pre>
+
+<p>Get last {{ per_page }} metapackages up to <b>firefox</b> (inclusive):</p>
+<pre>
+{{ url_for('api_v1_metapackages', bound='..firefox') }}
+</pre>
+
+<p>You may iterate through all metapackages by using the last metapackage name in the next
+request</p>
+<pre>
+{{ url_for('api_v1_metapackages') }}  # returns '010editor' ... 'aaut'
+{{ url_for('api_v1_metapackages', bound='aaut') }}  # returns 'aaut' ... 'acf-snort'
+{{ url_for('api_v1_metapackages', bound='acf-snort') }}  # returns 'acf-snort' ... 'adinatha-fonts'
+# ...
+</pre>
+
+<h3>Filtered metapackages</h3>
+
+<p>API supports all the filters available on the website, so you can just
+play with filters in the <a href="{{ url_for('metapackages') }}">website</a>
+and then replace <code>{{ url_for('metapackages') }}</code> URL prefix with
+<code>{{ url_for('api_v1_metapackages') }}</code> to get API output.</p>
+
+<p>Supported filters are:</p>
+<dl class="dl-horizontal">
+	<dt>search</dt><dd>metapackage name substring to look for</dd>
+	<dt>maintainer</dt><dd>return metapackages maintainer by specified person</dd>
+	<dt>category</dt><dd>return metapackages with specified category</dd>
+	<dt>inrepo</dt><dd>return metapackages present in specified repository</dd>
+	<dt>notinrepo</dt><dd>return metapackages absent in specified repository</dd>
+	<dt>minspread</dt><dd>return metapackages present in at least specified number of repository families (for instance, use 2 to get non-unique metapackages)</dd>
+	<dt>maxspread</dt><dd>return metapackages present in at most specified number of repository families (for instance, use 1 to get unique metapackages)</dd>
+</dl>
+
+<p>Example: get unique outdated metapackages not present in FreeBSD maintainer by foo@bar.com</p>
+<pre>
+{{ url_for('api_v1_metapackages', notinrepo='freebsd', maintainer='foo@bar.com', maxspread=1, outdated=1) }}
+</pre>
+
+<h3>Problems</h3>
+
+<p>Get problems for specific repository or maintainer:</p>
+<pre>
+{{ url_for('api_v1_repository_problems', repo='freebsd') }}
+{{ url_for('api_v1_maintainer_problems', maintainer='ports@freebsd.org')|replace('%40', '@') }}
+</pre>
+
+Output is an array of entries of the following format:
+
+<pre>
+{
+	"repo": "freebsd",
+	"name": "abby",
+	"effname": "abby",
+	"maintainer": "ports@freebsd.org",
+	"problem": "Homepage link \"https://code.google.com/archive/p/abby/\" points to Google Code which was discontinued. The link should be updated (probably along with download URLs). If this link is still alive, it may point to a new project homepage."
+}
+</pre>
+
+<p>Fields are:</p>
+<dl class="dl-horizontal">
+	<dt>repo</dt><dd>repository name</dd>
+	<dt>name</dt><dd>package name as in repository</dd>
+	<dt>effname</dt><dd>repology metapackage name</dd>
+	<dt>maintainer</dt><dd>package maintainer associated with the problem; may be null; note that if there are multiple package maintainers, problem is duplicated for each one</dd>
+	<dt>problem</dt><dd>textual description of the problem</dd>
+</dl>
+
+</article>
+
+</div>
+{% endblock %}

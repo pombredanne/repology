@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
-#
-# Copyright (C) 2016 Dmitry Marakasov <amdmi3@amdmi3.ru>
+# Copyright (C) 2016-2017 Dmitry Marakasov <amdmi3@amdmi3.ru>
 #
 # This file is part of repology
 #
@@ -17,23 +15,36 @@
 # You should have received a copy of the GNU General Public License
 # along with repology.  If not, see <http://www.gnu.org/licenses/>.
 
+import datetime
 import inspect
 import os
 import pickle
+import sys
+import time
+import traceback
 
 import yaml
 
-from repology.fetcher import *
+from repology.fetchers import Factory as FetcherFactory
 from repology.logger import NoopLogger
-from repology.package import PackageSanityCheckFailure
+from repology.package import PackageSanityCheckFailure, PackageSanityCheckProblem
 from repology.packageproc import PackagesMerge
-from repology.parser import *
+from repology.parsers import Factory as ParserFactory
+
+
+class StateFileFormatCheckProblem(Exception):
+    def __init__(self, where):
+        Exception.__init__(self, 'Illegal package format in {}. Please run `repology-update.py --parse` on all repositories to update the format.'.format(where))
 
 
 class RepositoryManager:
-    def __init__(self, repospath, statedir):
-        with open(repospath) as reposfile:
-            self.repositories = yaml.safe_load(reposfile)
+    def __init__(self, reposdir, statedir, fetch_retries=3, fetch_retry_delay=30):
+        self.repositories = []
+
+        for root, dirs, files in os.walk(reposdir):
+            for filename in filter(lambda f: f.endswith('.yaml'), files):
+                with open(os.path.join(root, filename)) as reposfile:
+                    self.repositories += yaml.safe_load(reposfile)
 
         # process source loops
         for repo in self.repositories:
@@ -45,18 +56,24 @@ class RepositoryManager:
                         for key in newsource.keys():
                             if isinstance(newsource[key], str):
                                 newsource[key] = newsource[key].replace('{source}', name)
-                        newsource['name'] = name.replace('/', '_')
+                        newsource['name'] = name
                         newsources.append(newsource)
                 else:
                     newsources.append(source)
             repo['sources'] = newsources
+
+            if 'sortname' not in repo:
+                repo['sortname'] = repo['name']
+
         self.statedir = statedir
+        self.fetch_retries = fetch_retries
+        self.fetch_retry_delay = fetch_retry_delay
 
     def __GetRepoPath(self, repository):
         return os.path.join(self.statedir, repository['name'] + '.state')
 
     def __GetSourcePath(self, repository, source):
-        return os.path.join(self.__GetRepoPath(repository), source['name'])
+        return os.path.join(self.__GetRepoPath(repository), source['name'].replace('/', '_'))
 
     def __GetSerializedPath(self, repository):
         return os.path.join(self.statedir, repository['name'] + '.packages')
@@ -67,6 +84,10 @@ class RepositoryManager:
                 return repository
 
         raise KeyError('No such repository ' + reponame)
+
+    def __CheckRepositoryOutdatedness(self, repository, logger):
+        if 'valid_till' in repository and datetime.date.today() >= repository['valid_till']:
+            logger.Log('WARNING: Repository {} has reached EoL, please update configs'.format(repository['name']))
 
     def __GetRepositories(self, reponames=None):
         if reponames is None:
@@ -87,52 +108,74 @@ class RepositoryManager:
 
         return filtered_repositories
 
-    # Parser/fetcher factory
-    def __SpawnClass(self, suffix, name, argsdict):
-        spawned_name = name + suffix
-        if spawned_name not in globals():
-            raise RuntimeError('unknown {} {}'.format(suffix.lower(), name))
-
-        spawned_class = globals()[spawned_name]
-        spawned_argspec = inspect.getfullargspec(spawned_class.__init__)
-        spawned_args = {
-            key: value for key, value in argsdict.items() if key in spawned_argspec.args
-        }
-
-        return spawned_class(**spawned_args)
-
     # Private methods which provide single actions on sources
     def __FetchSource(self, update, repository, source, logger):
-        logger.Log('fetching source {} started'.format(source['name']))
+        if 'fetcher' not in source:
+            logger.Log('fetching source {} not supported'.format(source['name']))
+            return
 
-        self.__SpawnClass(
-            'Fetcher',
-            source['fetcher'],
-            source
-        ).Fetch(
-            self.__GetSourcePath(repository, source),
-            update=update,
-            logger=logger.GetIndented()
-        )
+        fetcher = FetcherFactory.Spawn(source['fetcher'], source)
 
-        logger.Log('fetching source {} complete'.format(source['name']))
+        ntry = 1
+        while ntry <= self.fetch_retries:
+            logger.Log('fetching source {} try {} started'.format(source['name'], ntry))
+
+            try:
+                fetcher.Fetch(
+                    self.__GetSourcePath(repository, source),
+                    update=update,
+                    logger=logger.GetIndented()
+                )
+
+                break
+            except KeyboardInterrupt:
+                raise
+            except:
+                if ntry >= self.fetch_retries:
+                    raise
+
+                logger.Log('fetching source {} try {} failed:'.format(source['name'], ntry))
+                for item in traceback.format_exception(*sys.exc_info()):
+                    for line in item.split('\n'):
+                        if line:
+                            logger.GetIndented().Log(line)
+
+                logger.Log('waiting {} seconds before retry'.format(self.fetch_retry_delay))
+                if self.fetch_retry_delay:
+                    time.sleep(self.fetch_retry_delay)
+
+            ntry += 1
+
+        logger.Log('fetching source {} complete with {} tries'.format(source['name'], ntry))
 
     def __ParseSource(self, repository, source, logger):
+        if 'parser' not in source:
+            logger.Log('parsing source {} not supported'.format(source['name']))
+            return []
+
         logger.Log('parsing source {} started'.format(source['name']))
 
         # parse
-        packages = self.__SpawnClass(
-            'Parser',
+        packages = ParserFactory.Spawn(
             source['parser'],
             source
         ).Parse(
             self.__GetSourcePath(repository, source)
         )
 
-        # fill subrepos
-        if 'subrepo' in source:
-            for package in packages:
+        logger.Log('parsing source {} postprocessing'.format(source['name']))
+
+        for package in packages:
+            # - fill subrepos
+            if 'subrepo' in source:
                 package.subrepo = source['subrepo']
+
+            # - fill default maintainer
+            if not package.maintainers:
+                if 'default_maintainer' in repository:
+                    package.maintainers = [repository['default_maintainer']]
+                else:
+                    package.maintainers = ['fallback-mnt-{}@repology'.format(repository['name'])]
 
         logger.Log('parsing source {} complete'.format(source['name']))
 
@@ -179,11 +222,14 @@ class RepositoryManager:
                 transformer.Process(package)
 
             try:
-                package.CheckSanity()
+                package.CheckSanity(transformed=transformer is not None)
             except PackageSanityCheckFailure as err:
-                sanitylogger.Log('sanity: {}'.format(err))
+                sanitylogger.Log('sanity error: {}'.format(err))
+                raise
+            except PackageSanityCheckProblem as err:
+                sanitylogger.Log('sanity warning: {}'.format(err))
 
-            package.Sanitize()
+            package.Normalize()
 
         if transformer:
             packages = sorted(packages, key=lambda package: package.effname)
@@ -206,7 +252,7 @@ class RepositoryManager:
             pickler.dump(len(packages))
             for package in packages:
                 pickler.dump(package)
-        os.rename(tmppath, path)
+        os.replace(tmppath, path)
         logger.Log('saving complete, {} packages'.format(len(packages)))
 
     def __Deserialize(self, path, repository, logger):
@@ -216,6 +262,8 @@ class RepositoryManager:
             unpickler = pickle.Unpickler(infile)
             numpackages = unpickler.load()
             packages = [unpickler.load() for num in range(0, numpackages)]
+            if packages and not packages[0].CheckFormat():
+                raise StateFileFormatCheckProblem(path)
         logger.Log('loading complete, {} packages'.format(len(packages)))
 
         return packages
@@ -227,6 +275,9 @@ class RepositoryManager:
             self.current = None
 
             self.Get()
+
+            if self.current and not self.current.CheckFormat():
+                raise StateFileFormatCheckProblem(path)
 
         def Peek(self):
             return self.current
@@ -245,21 +296,33 @@ class RepositoryManager:
 
     # Helpers to retrieve data on repositories
     def GetNames(self, reponames=None):
-        return sorted([repo['name'] for repo in self.__GetRepositories(reponames)])
+        def GetName(repo):
+            return repo['name']
 
-    def GetMetadata(self):
-        return {repository['name']: {
-            'incomplete': repository.get('incomplete', False),
-            'shadow': repository.get('shadow', False),
-            'repolinks': repository.get('repolinks', []),
-            'packagelinks': repository.get('packagelinks', []),
-            'family': repository['family'],
-            'desc': repository['desc'],
-        } for repository in self.repositories}
+        def GetSortName(repo):
+            return repo['sortname']
+
+        return list(map(GetName, sorted(self.__GetRepositories(reponames), key=GetSortName)))
+
+    def GetMetadata(self, reponames=None):
+        return {
+            repository['name']: {
+                'incomplete': repository.get('incomplete', False),
+                'shadow': repository.get('shadow', False),
+                'repolinks': repository.get('repolinks', []),
+                'packagelinks': repository.get('packagelinks', []),
+                'family': repository['family'],
+                'desc': repository['desc'],
+                'type': repository['type'],
+                'color': repository.get('color'),
+            } for repository in self.__GetRepositories(reponames)
+        }
 
     # Single repo methods
     def Fetch(self, reponame, update=True, logger=NoopLogger()):
         repository = self.__GetRepository(reponame)
+
+        self.__CheckRepositoryOutdatedness(repository, logger)
 
         self.__Fetch(update, repository, logger)
 
@@ -316,7 +379,14 @@ class RepositoryManager:
         for repo in self.__GetRepositories(reponames):
             deserializers.append(self.__StreamDeserializer(self.__GetSerializedPath(repo)))
 
-        while deserializers:
+        while True:
+            # remove EOFed repos
+            deserializers = [ds for ds in deserializers if not ds.EOF()]
+
+            # stop when all deserializers are empty
+            if not deserializers:
+                break
+
             # find lowest key (effname)
             thiskey = deserializers[0].Peek().effname
             for ds in deserializers[1:]:
@@ -329,6 +399,3 @@ class RepositoryManager:
                     packageset.append(ds.Get())
 
             processor(packageset)
-
-            # remove EOFed repos
-            deserializers = [ds for ds in deserializers if not ds.EOF()]
